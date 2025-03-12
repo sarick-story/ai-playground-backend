@@ -139,9 +139,16 @@ async def run_agent(
     """Run the agent with the given user message."""
     logger.info(f"Starting run_agent with message: {user_message[:50]}...")
 
-    # Server path setup code remains the same...
-    server_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                          "story-mcp-hub/storyscan-mcp/server.py")
+    # Update the server path to handle both local development and Docker environments
+    server_path = os.environ.get("MCP_SERVER_PATH")
+    if not server_path:
+        # Local development path (relative to parent directory)
+        server_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                              "story-mcp-hub/storyscan-mcp/server.py")
+    else:
+        # Docker environment - use absolute path from environment variable
+        server_path = "/app/story-mcp-hub/storyscan-mcp/server.py"
+
     logger.info(f"Server path: {server_path}")
     
     if not os.path.exists(server_path):
