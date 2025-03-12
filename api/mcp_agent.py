@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langgraph.store.memory import InMemoryStore
 from langmem import create_memory_store_manager, create_manage_memory_tool, create_search_memory_tool
+import openai
 
 load_dotenv()
 
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 model = ChatOpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"), streaming=True)
 
 system_prompt = """
-    You are a specialized assistant focused on the Story protocol and blockchain analytics. 
+    You are a specialized assistant chat bot focused on the Story protocol and blockchain analytics. 
     Only handle actions directly related to the Story protocol, blockchain, and the tools provided.
     Tools Provided:
 
@@ -39,7 +40,7 @@ system_prompt = """
         - get_nft_holdings: Retrieves all NFT holdings for a given address, including collection information and metadata.
         - interpret_transaction: Provides a human-readable interpretation of a blockchain transaction based on its hash.
 
-    If it is unrelated to these topics, return "I'm sorry, I can only help with the Story protocol and blockchain analytics."
+    If it is unrelated to these topics, return: "I'm sorry, I can only help with the Story protocol and blockchain analytics."
     
     Provide concise and clear analyses of findings using the available tools.
     Remember the coin is $IP and the data is coming from blockscout API.
@@ -262,13 +263,45 @@ async def run_agent(
                     
                     # Run agent with streaming
                     logger.info("Starting agent with streaming")
-                    result = await agent.ainvoke(
-                        {"messages": messages},  # Pass full message history
-                        config={"callbacks": callbacks}
-                    )
-                    logger.info("Agent completed execution with streaming")
-                    await queue.put({"done": True})
-                    return result
+                    try:
+                        result = await agent.ainvoke(
+                            {"messages": messages},
+                            config={"callbacks": callbacks}
+                        )
+                        logger.info("Agent completed execution with streaming")
+                        await queue.put({"done": True})
+                        return result
+                    except openai.RateLimitError as e:
+                        # Format OpenAI rate limit as an agent message
+                        error_message = "I'm sorry, but I've reached my API rate limit. Please try again in a few moments. If this persists, you may need to check your OpenAI account quota."
+                        logger.error(f"OpenAI Rate Limit Error: {str(e)}")
+                        
+                        if queue:
+                            # Send the error as a regular message token by token
+                            for token in error_message.split():
+                                await queue.put(token + " ")
+                            await queue.put({"done": True})
+                        
+                        # Return formatted as an agent response
+                        return {
+                            "messages": messages + [{"role": "assistant", "content": error_message}]
+                        }
+                    except Exception as e:
+                        # Format other exceptions as agent messages
+                        error_message = f"I encountered an issue while processing your request: {str(e)}"
+                        logger.error(f"Error during agent execution: {str(e)}")
+                        logger.error(traceback.format_exc())
+                        
+                        if queue:
+                            # Send the error as a regular message token by token
+                            for token in error_message.split():
+                                await queue.put(token + " ")
+                            await queue.put({"done": True})
+                        
+                        # Return formatted as an agent response
+                        return {
+                            "messages": messages + [{"role": "assistant", "content": error_message}]
+                        }
                 
                 else:
                     # Run without streaming
@@ -278,11 +311,21 @@ async def run_agent(
                     return result
 
     except Exception as e:
+        # Handle exceptions from the stdio client setup
+        error_message = f"I'm having trouble connecting to my tools. Please try again later. Technical details: {str(e)}"
         logger.error(f"Error in agent execution: {str(e)}")
         logger.error(traceback.format_exc())
+        
         if queue:
-            await queue.put({"error": str(e)})
-        raise
+            # Send the error as a regular message token by token
+            for token in error_message.split():
+                await queue.put(token + " ")
+            await queue.put({"done": True})
+        
+        # Return formatted as an agent response
+        return {
+            "messages": messages + [{"role": "assistant", "content": error_message}]
+        }
 
 # Run the async function
 if __name__ == "__main__":
