@@ -75,6 +75,36 @@ The backend is built with:
 - OpenAI for AI capabilities
 - MCP for blockchain integration
 
+## Deployment
+
+### Google Cloud Run Deployment
+
+1. Install the Google Cloud CLI and initialize:
+```bash
+# Install gcloud CLI (follow instructions for your OS)
+gcloud init
+gcloud auth configure-docker
+```
+
+2. Build and push the Docker image:
+```bash
+# Build the image
+docker build -t gcr.io/[PROJECT_ID]/ai-playground-backend .
+
+# Push to Google Container Registry
+docker push gcr.io/[PROJECT_ID]/ai-playground-backend
+```
+
+3. Deploy to Cloud Run:
+```bash
+gcloud run deploy ai-playground-backend \
+  --image gcr.io/[PROJECT_ID]/ai-playground-backend \
+  --platform managed \
+  --region [REGION] \
+  --allow-unauthenticated \
+  --set-env-vars "OPENAI_API_KEY=[YOUR_KEY]"
+```
+
 ## Troubleshooting
 
 - If you encounter any issues with UV, make sure it's properly installed and in your PATH
