@@ -92,34 +92,3 @@ async def handle_chat(request: Request, protocol: str = Query('data')):
         }
     )
 
-@app.get("/debug/memories")
-async def list_all_memories():
-    """List all memories for debugging purposes"""
-    try:
-        # Get all memories
-        all_memories = store.search(("memories",), limit=100)
-        
-        # Group by conversation ID
-        grouped = {}
-        for item in all_memories:
-            namespace_str = ".".join(item.namespace)
-            if namespace_str not in grouped:
-                grouped[namespace_str] = []
-            
-            memory_content = ""
-            if item.value and "content" in item.value:
-                if isinstance(item.value["content"], dict) and "content" in item.value["content"]:
-                    memory_content = item.value["content"]["content"]
-                elif isinstance(item.value["content"], str):
-                    memory_content = item.value["content"]
-            
-            grouped[namespace_str].append({
-                "key": item.key,
-                "content": memory_content,
-                "created_at": item.created_at
-            })
-        
-        return grouped
-    except Exception as e:
-        logger.error(f"Error listing all memories: {str(e)}")
-        return {"error": str(e)}
