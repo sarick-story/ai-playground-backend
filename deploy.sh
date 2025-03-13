@@ -30,7 +30,8 @@ gcloud run deploy ${SERVICE_NAME} \
   --region ${REGION} \
   --min-instances 1 \
   --no-allow-unauthenticated \
-  --set-env-vars=openai_api_key=${OPENAI_API_KEY}
+  --set-env-vars="OPENAI_API_KEY=${OPENAI_API_KEY}"
+
 # Step 3: Get the service URL
 echo "🔍 Getting service URL..."
 SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} --region ${REGION} --format="value(status.url)")
