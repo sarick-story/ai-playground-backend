@@ -79,31 +79,21 @@ The backend is built with:
 
 ### Google Cloud Run Deployment
 
-1. Install the Google Cloud CLI and initialize:
+Export your OpenAI API key and run the deployment script:
+
 ```bash
-# Install gcloud CLI (follow instructions for your OS)
-gcloud init
-gcloud auth configure-docker
+# Export your OpenAI API key
+export OPENAI_API_KEY=your_openai_api_key_here
+
+# Run the deployment script
+./deploy.sh
 ```
 
-2. Build and push the Docker image:
-```bash
-# Build the image
-docker build -t gcr.io/[PROJECT_ID]/ai-playground-backend .
-
-# Push to Google Container Registry
-docker push gcr.io/[PROJECT_ID]/ai-playground-backend
-```
-
-3. Deploy to Cloud Run:
-```bash
-gcloud run deploy ai-playground-backend \
-  --image gcr.io/[PROJECT_ID]/ai-playground-backend \
-  --platform managed \
-  --region [REGION] \
-  --allow-unauthenticated \
-  --set-env-vars "OPENAI_API_KEY=[YOUR_KEY]"
-```
+The script will:
+1. Build and push the Docker image to Google Container Registry
+2. Deploy the application to Cloud Run
+3. Configure the necessary environment variables
+4. Display the service URL upon completion
 
 ## Troubleshooting
 
