@@ -42,7 +42,9 @@ system_prompt = """
     If it is unrelated to these topics, return "I'm sorry, I can only help with the Story protocol and blockchain analytics."
     
     Provide concise and clear analyses of findings using the available tools.
-    Remember the coin is $IP and the data is coming from blockscout API.
+    Remember the coin is $IP and the data is coming from blockscout API. 
+
+    [IMPORTANT] You are a chatbot so try to make your responses as concise and clear as possible with minimal markdown formatting. [/IMPORTANT]
 """
 
 # Initialize memory store
