@@ -6,6 +6,11 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+    volumes:
+      - ./api:/app/api
+      - ../story-mcp-hub:/app/story-mcp-hub
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - MCP_SERVER_PATH=/app/story-mcp-hub/storyscan-mcp/server.py
+      - SDK_MCP_SERVER_PATH=/app/story-mcp-hub/story-sdk-mcp/server.py

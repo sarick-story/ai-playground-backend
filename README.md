@@ -1,103 +1,146 @@
 # AI Playground Backend
 
-This is the backend server for the MCP Playground application. It provides the API endpoints needed by the frontend to interact with OpenAI and the Story MCP Hub.
+This is the backend for the AI Playground, providing APIs for the frontend to communicate with various AI models and services.
+
+## Features
+
+- Integration with different MCPs (Model Context Protocols)
+- Support for Storyscan blockchain analytics
+- Support for Story SDK operations with wallet integration
+- Streaming responses for real-time interaction
 
 ## Prerequisites
 
-1. Install UV (Python Package Manager):
+- Python 3.12+
+- Node.js 18+ (for frontend)
+- Story Protocol account and API key
+- Pinata account and JWT (for IPFS operations)
+- RPC Provider URL for blockchain access
+
+## Installation
+
+1. Clone the repository:
+
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone <repository-url>
+cd ai-playground-backend
 ```
 
-2. Python 3.12 or higher is required. You can check your Python version with:
-```bash
-python --version
-```
+2. Create and activate a virtual environment:
 
-3. Clone the Story MCP Hub repository (if not already done):
 ```bash
-# Navigate to the parent directory of ai-playground-backend
-cd ..
-git clone https://github.com/piplabs/story-mcp-hub.git
-```
-
-## Environment Setup
-
-1. Create a `.env` file in the root directory with the following variables:
-```bash
-OPENAI_API_KEY=your_openai_api_key_here
-```
-
-2. Install dependencies:
-```bash
-# Create and activate a virtual environment
-uv venv
+python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-uv pip install -e .
 ```
 
-## Running the Application
+3. Install dependencies:
 
-Start the backend server:
+```bash
+pip install .
+```
+
+Alternatively, you can install all dependencies including development tools with:
+
+```bash
+pip install -e ".[dev]"
+```
+
+4. Set up environment variables:
+
+Copy `.env.example` to `.env` and fill in the required values:
+
+```bash
+cp .env.example .env
+```
+
+Edit the `.env` file to include:
+
+```
+OPENAI_API_KEY=your-openai-api-key
+RPC_PROVIDER_URL=your-ethereum-rpc-url
+WALLET_PRIVATE_KEY=your-wallet-private-key  # Optional: Only needed for server-side signing
+PINATA_JWT=your-pinata-jwt  # Optional: Only needed for IPFS operations
+```
+
+## Usage
+
+### Running the server
+
+Start the server with:
+
 ```bash
 python -m api.index
 ```
 
-The backend will run on http://localhost:8000. You can verify it's running by visiting http://localhost:8000/health in your browser, which should return `{"status": "ok"}`.
+This will start the server on port 8000 by default. You can specify a different port by setting the `PORT` environment variable.
 
-## API Endpoints
+### Available MCPs
 
-The backend provides the following main endpoints:
+1. **Storyscan MCP** - For blockchain analytics
+2. **SDK MCP** - For Story SDK operations with wallet integration
 
-- `/api/chat`: Handles chat interactions with OpenAI models
-- `/health`: Health check endpoint
+## SDK MCP Setup
 
-## Project Structure
+The SDK MCP requires the following dependencies:
+
+```bash
+pip install story-protocol-python-sdk web3
 ```
-ai-playground-backend/
-├── api/              # Backend API endpoints
-│   ├── __init__.py   # Package initialization
-│   ├── index.py      # Main FastAPI application
-│   ├── chat.py       # Chat API endpoints
-│   ├── mcp_agent.py  # MCP Agent implementation
-│   └── utils/        # Utility functions
-├── pyproject.toml    # Project dependencies and configuration
-└── .env              # Environment variables (not in version control)
+
+If you encounter the error `ModuleNotFoundError: No module named 'story_protocol_python_sdk'`, make sure to install the package using:
+
+```bash
+pip install story-protocol-python-sdk
 ```
+
+## Docker Support
+
+You can also run the application using Docker:
+
+```bash
+docker-compose up --build
+```
+
+This will start both the backend and necessary services.
 
 ## Development
 
-The backend is built with:
-- FastAPI for the API framework
-- Uvicorn as the ASGI server
-- OpenAI for AI capabilities
-- MCP for blockchain integration
+### Local Development
 
-## Deployment
-
-### Google Cloud Run Deployment
-
-Export your OpenAI API key and run the deployment script:
+For local development, you can use the provided `localdeploy.sh` script:
 
 ```bash
-# Export your OpenAI API key
-export OPENAI_API_KEY=your_openai_api_key_here
-
-# Run the deployment script
-./deploy.sh
+./localdeploy.sh
 ```
 
-The script will:
-1. Build and push the Docker image to Google Container Registry
-2. Deploy the application to Cloud Run
-3. Configure the necessary environment variables
-4. Display the service URL upon completion
+This will start the server with hot-reloading enabled for faster development.
+
+### Working with MCPs
+
+To work with both the Storyscan MCP and the SDK MCP, you'll need to:
+
+1. Clone the MCP repositories in the same parent directory as this project
+2. Ensure the directory structure is as follows:
+   - `/your/workspace/ai-playground-backend`
+   - `/your/workspace/story-mcp-hub/storyscan-mcp`
+   - `/your/workspace/story-mcp-hub/story-sdk-mcp`
+
+3. Set the environment variables in your `.env` file:
+   ```
+   MCP_SERVER_PATH=/app/story-mcp-hub/storyscan-mcp/server.py
+   SDK_MCP_SERVER_PATH=/app/story-mcp-hub/story-sdk-mcp/server.py
+   ```
 
 ## Troubleshooting
 
-- If you encounter any issues with UV, make sure it's properly installed and in your PATH
-- Ensure the Story MCP Hub repository is in the same parent directory
-- Verify that all environment variables are properly set
-- If you get dependency errors, try updating your dependencies with `uv pip install -e .`
+### Common Issues
+
+1. **Missing SDK dependencies**: If you see errors about missing modules, ensure you have installed all required packages with `pip install story-protocol-python-sdk web3`.
+
+2. **StoryClient initialization errors**: The StoryClient initializer requires `web3`, `account`, and `chain_id` parameters. If you see errors like `StoryClient.__init__() got an unexpected keyword argument`, check that your code is using the correct parameter format.
+
+3. **RPC connection issues**: If you see errors connecting to the blockchain, check your RPC provider URL in the `.env` file.
+
+## License
+
+[MIT License](LICENSE)
