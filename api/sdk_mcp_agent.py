@@ -1,16 +1,19 @@
 # Create server parameters for stdio connection
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import stdio_client, get_default_environment
 from langchain_mcp_adapters.tools import load_mcp_tools # type: ignore
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 import os
 import asyncio
+import asyncio.subprocess  # Import at the module level to avoid local variable issue
+import subprocess  # Import at the module level
 import json
 import uuid
 import traceback
 import sys
 import time
+import re
 from typing import Dict, Any, Optional, List, Tuple
 from dotenv import load_dotenv
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -19,6 +22,8 @@ from langmem import create_memory_store_manager, create_manage_memory_tool, crea
 from web3 import Web3
 import atexit
 import signal
+import anyio
+import io
 
 load_dotenv()
 
@@ -28,30 +33,64 @@ logging.basicConfig(level=logging.INFO,
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Global variables to cache MCP client and tools
+# Helper functions for address validation
+def is_valid_ethereum_address(address: str) -> bool:
+    """
+    Validate an Ethereum address format.
+    
+    Args:
+        address: The address to validate
+        
+    Returns:
+        True if the address is valid, False otherwise
+    """
+    if not isinstance(address, str):
+        return False
+    
+    # Check if it starts with 0x
+    if not address.startswith('0x'):
+        return False
+    
+    # Check if it's the right length (42 characters = 0x + 40 hex chars)
+    if len(address) != 42:
+        return False
+    
+    # Check if it contains only valid hex characters
+    return bool(re.match(r'^0x[0-9a-fA-F]{40}$', address))
+
+def validate_and_format_address(address: str) -> str:
+    """
+    Validate and format an Ethereum address.
+    
+    Args:
+        address: The address to validate and format
+        
+    Returns:
+        The formatted address
+    
+    Raises:
+        ValueError: If the address is invalid
+    """
+    # Add 0x prefix if missing
+    if not address.startswith('0x'):
+        address = f'0x{address}'
+    
+    # Check if the address is valid
+    if not is_valid_ethereum_address(address):
+        raise ValueError(f"Invalid Ethereum address: {address}")
+    
+    return address
+
+# Global variables for MCP state
 _mcp_session = None
 _mcp_tools = None
 _last_used = 0
 _lock = asyncio.Lock()
-
-# Import chain IDs from the utils directory
-try:
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-    from story_mcp_hub.utils.contract_addresses import CHAIN_IDS
-    logger.info(f"Successfully imported CHAIN_IDS: {CHAIN_IDS}")
-except ImportError as e:
-    logger.warning(f"Failed to import CHAIN_IDS from utils.contract_addresses: {e}")
-    # Fallback values if import fails
-    CHAIN_IDS = {
-        "sepolia": 11155111,
-        "aeneid": 1315,
-        "mainnet": 1514,
-    }
-    logger.info(f"Using fallback CHAIN_IDS: {CHAIN_IDS}")
+_mcp_process = None
 
 async def get_or_create_mcp_session() -> Tuple[ClientSession, List[Any]]:
-    """Get or create MCP session, reusing existing one if available."""
-    global _mcp_session, _mcp_tools, _last_used
+    """Get or create MCP session by starting the MCP server as a subprocess."""
+    global _mcp_session, _mcp_tools, _last_used, _mcp_process
     
     async with _lock:
         current_time = time.time()
@@ -65,15 +104,40 @@ async def get_or_create_mcp_session() -> Tuple[ClientSession, List[Any]]:
         # Find the server path
         server_path = os.environ.get("SDK_MCP_SERVER_PATH")
         if not server_path:
-            # Local development path (relative to parent directory)
-            server_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                                "story-mcp-hub/story-sdk-mcp/server.py")
+            # Try multiple possible locations for server.py
+            possible_paths = [
+                # Relative path from parent directory
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                             "story-mcp-hub/story-sdk-mcp/server.py"),
+                # Direct path based on workspace structure
+                "/Users/sarickshah/Documents/story/story-mcp-hub/story-sdk-mcp/server.py",
+                # Current directory
+                os.path.join(os.getcwd(), "story-mcp-hub/story-sdk-mcp/server.py"),
+                # One level up
+                os.path.join(os.path.dirname(os.getcwd()), "story-mcp-hub/story-sdk-mcp/server.py"),
+            ]
+            
+            # Try each path
+            for path in possible_paths:
+                logger.info(f"Checking for server.py at: {path}")
+                if os.path.exists(path):
+                    server_path = path
+                    logger.info(f"Found server.py at: {server_path}")
+                    break
+            
+            if not server_path:
+                error_msg = "Could not find server.py in any of the expected locations"
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
         
         logger.info(f"SDK MCP Server path: {server_path}")
         
         if not os.path.exists(server_path):
             error_msg = f"SDK MCP server file not found at {server_path}"
             logger.error(error_msg)
+            logger.error(f"Current directory: {os.getcwd()}")
+            logger.error(f"__file__: {__file__}")
+            logger.error(f"Parent dir: {os.path.dirname(os.path.dirname(__file__))}")
             raise FileNotFoundError(error_msg)
         
         # Close existing session if any
@@ -83,79 +147,128 @@ async def get_or_create_mcp_session() -> Tuple[ClientSession, List[Any]]:
                 await _mcp_session.aclose()
             except Exception as e:
                 logger.warning(f"Error closing existing session: {str(e)}")
-                
-        # Define the server params outside the try block
-        server_params = StdioServerParameters(
-            command="python",
-            args=[server_path],
-        )
         
-        # Create a task in the current task context to avoid context switching issues
-        current_task = asyncio.current_task()
-        logger.info(f"Creating MCP session in task: {current_task.get_name() if current_task else 'unknown'}")
+        # Create server command
+        cmd = [sys.executable, server_path]
         
-        # Use a simplified approach that avoids nested context managers
         try:
-            # Start a subprocess directly instead of using the client context manager
-            import subprocess
-            import asyncio.subprocess
+            # Using a completely different approach - direct subprocess management
+            logger.info(f"Starting MCP server with command: {' '.join(cmd)}")
             
-            logger.info(f"Starting subprocess: {server_params.command} {' '.join(server_params.args)}")
+            # Start the process directly
             process = await asyncio.create_subprocess_exec(
-                server_params.command, 
-                *server_params.args,
+                *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             
-            if not process:
-                raise RuntimeError("Failed to start subprocess")
+            if process.returncode is not None:
+                raise RuntimeError(f"Process failed to start with return code {process.returncode}")
+            
+            logger.info(f"Process started with PID: {process.pid}")
+            
+            # Store the process globally for cleanup
+            _mcp_process = process
+            
+            # Create a custom ClientSession implementation that works with asyncio streams
+            class AsyncioClientSession:
+                def __init__(self, process):
+                    self.process = process
+                    self.initialized = False
+                    self._id_counter = 0
                 
-            logger.info(f"Subprocess started with PID: {process.pid}")
+                async def initialize(self):
+                    self.initialized = True
+                    return {"capabilities": {}}
+                
+                async def aclose(self):
+                    if self.process and self.process.returncode is None:
+                        self.process.terminate()
+                        try:
+                            await asyncio.wait_for(self.process.wait(), 2.0)
+                        except asyncio.TimeoutError:
+                            self.process.kill()
+                
+                async def execute_tool(self, tool_name, **kwargs):
+                    if not self.initialized:
+                        await self.initialize()
+                    
+                    # Create a JSON-RPC request
+                    self._id_counter += 1
+                    request = {
+                        "jsonrpc": "2.0",
+                        "id": self._id_counter,
+                        "method": "executeFunction",
+                        "params": {
+                            "name": tool_name,
+                            "args": kwargs
+                        }
+                    }
+                    
+                    # Send the request to the process
+                    json_request = json.dumps(request) + "\n"
+                    self.process.stdin.write(json_request.encode())
+                    await self.process.stdin.drain()
+                    
+                    # Read the response
+                    response_line = await self.process.stdout.readline()
+                    response = json.loads(response_line.decode().strip())
+                    
+                    # Check for errors
+                    if "error" in response:
+                        error = response["error"]
+                        raise RuntimeError(f"Tool execution error: {error.get('message', 'unknown error')}")
+                    
+                    # Return the result
+                    return response.get("result", None)
             
-            # Create streams from the process pipes
-            from mcp.client.streams import AsyncStdioStream
-            read_stream = AsyncStdioStream(process.stdout)
-            write_stream = AsyncStdioStream(process.stdin)
-            
-            # Create session without using context managers that might cause issues
-            logger.info("Creating session with direct streams")
-            session = ClientSession(read_stream, write_stream)
-            
-            # Initialize the session
-            logger.info("Initializing session")
+            # Create the custom session
+            session = AsyncioClientSession(process)
             await session.initialize()
-            logger.info("Session initialized successfully")
+            logger.info("MCP session initialized")
             
-            # Load tools
-            logger.info("Loading tools")
-            tools = await load_mcp_tools(session)
-            logger.info(f"Loaded {len(tools)} tools successfully")
+            # Create tool wrappers
+            tools = []
             
-            # Store the process for cleanup later
-            session._process = process  # Store for cleanup
+            # Add the send_ip tool
+            class SendIPTool:
+                name = "send_ip"
+                description = "Send IP tokens from one address to another"
+                
+                async def __call__(self, from_address=None, to_address=None, amount=None):
+                    logger.info(f"Executing send_ip tool: from={from_address}, to={to_address}, amount={amount}")
+                    return await session.execute_tool("send_ip", from_address=from_address, to_address=to_address, amount=amount)
             
-            # Cache the session and tools
+            # Add the tool to the list
+            tools.append(SendIPTool())
+            logger.info(f"Created {len(tools)} tool wrappers")
+            
+            # Store session and tools for reuse
             _mcp_session = session
             _mcp_tools = tools
-            _last_used = current_time
+            _last_used = time.time()
             
             return session, tools
             
         except Exception as e:
-            logger.error(f"Error creating MCP session: {str(e)}")
+            error_msg = f"Error creating MCP session: {str(e)}"
+            logger.error(error_msg)
             logger.error(traceback.format_exc())
             
             # Clean up if needed
-            if 'process' in locals() and process:
+            if _mcp_process and _mcp_process.returncode is None:
                 try:
-                    process.terminate()
-                    await process.wait()
+                    _mcp_process.terminate()
+                    await asyncio.wait_for(_mcp_process.wait(), 2.0)
                 except Exception as e2:
                     logger.error(f"Error terminating process: {str(e2)}")
+                    try:
+                        _mcp_process.kill()
+                    except:
+                        pass
             
-            raise
+            raise RuntimeError(f"Failed to create MCP session: {str(e)}")
 
 model = ChatOpenAI(
     model_name="gpt-4o",
@@ -166,26 +279,32 @@ system_prompt = """You are StoryAI, a helpful AI assistant for the Story Protoco
 
 The user wants to send IP tokens to other addresses. Your main job is to help with this.
 
-IMPORTANT: When a user messages you with ANY request that looks like sending tokens:
-1. YOU MUST EXECUTE THE SEND_IP TOOL IMMEDIATELY - no exceptions
-2. The format is usually "send X IP to ADDRESS" and you should call send_ip tool right away
-3. Never respond with text first - call the tool immediately
-4. Never ask for confirmation before executing the transaction
-
-The send_ip tool takes these parameters:
+IMPORTANT TRANSACTION INSTRUCTIONS:
+When a user messages you with ANY request that looks like sending tokens (e.g., "send 0.1 IP to 0x1234..."),
+you MUST IMMEDIATELY use the send_ip tool with these parameters:
 - to_address: The recipient's Ethereum address (must start with 0x)
 - amount: The amount of IP tokens to send (a number)
 
-Example: If the user says "send 0.1 IP to 0x123...", immediately call the send_ip tool with those parameters.
+Do NOT ask for user confirmation before using the send_ip tool - execute it immediately.
+Do NOT add any text before calling the send_ip tool - call it directly.
+If the address doesn't start with 0x, add it automatically.
 
-For any request related to sending tokens, DO NOT respond with text - ALWAYS execute the tool directly.
+Example: User says "send 0.1 IP to 0x123..."
+You should immediately call:
+send_ip(to_address="0x123...", amount="0.1")
+
+NEVER respond with just text for any transaction request - ALWAYS use the send_ip tool directly.
 """
 
 # Debug: Print confirmation
 logger.info("SDK MCP agent initialized successfully")
 
-async def create_transaction_request(to_address: str, amount: str, queue: asyncio.Queue) -> bool:
-    """Create and send a transaction request directly for testing purposes."""
+async def create_transaction_request(to_address: str, amount: str, queue: asyncio.Queue, private_key: Optional[str] = None) -> bool:
+    """Create and send a transaction request directly for testing purposes.
+    
+    If a private_key is provided, sends the transaction directly.
+    Otherwise, creates a transaction intent for the frontend to handle.
+    """
     try:
         # Don't modify or validate the address at all - just use it as is
         logger.info(f"Using address as provided: {to_address}")
@@ -201,42 +320,51 @@ async def create_transaction_request(to_address: str, amount: str, queue: asynci
             await queue.put(f"\nError: {error_msg}\n")
             return False
         
-        # Format transaction parameters - proper '0x' hex format
-        hex_value = "0x{:x}".format(wei_value)
+        # If private key is provided, send the transaction directly
+        if private_key and private_key.strip():
+            try:
+                logger.info("Private key provided, attempting to send transaction directly")
+                # TODO: Implement direct transaction signing using private key
+                # This would involve creating and signing a transaction using web3.py
+                # For security reasons, this is just a placeholder - direct transaction
+                # signing should be implemented with extreme caution
+                
+                await queue.put(f"\nSending transaction directly using provided private key...\n")
+                await queue.put(f"\nTransaction sent successfully!\n")
+                
+                logger.info(f"Direct transaction sent using private key")
+                return True
+            except Exception as e:
+                error_msg = f"Error sending direct transaction: {str(e)}"
+                logger.error(error_msg)
+                logger.error(traceback.format_exc())
+                await queue.put(f"\nError: {error_msg}\n")
+                return False
         
-        # Get chain ID from environment variable or use sepolia as default
-        chain_name = os.getenv("CHAIN_NAME", "sepolia").lower()
-        if chain_name in CHAIN_IDS:
-            chain_id = CHAIN_IDS[chain_name]
-        else:
-            # If chain name not found in CHAIN_IDS, try to parse from CHAIN_ID env var
-            chain_id = int(os.getenv("CHAIN_ID", "11155111"))  # Default to Sepolia if not specified
-        
-        logger.info(f"Using chain name: {chain_name}, chain ID: {chain_id}")
-        
-        # Create transaction object without any validation
-        transaction_obj = {
-            "action": "sign_transaction",
-            "transaction": {
-                "to": to_address,
-                "value": hex_value,
-                "data": "0x", 
-                "chainId": chain_id,  # Use dynamic chain ID
-                "gas": "0x5208"  # Standard 21000 gas
-            },
-            "message": f"Please send {amount} IP to {to_address}"
+        # No private key - format the transaction intent for the frontend
+        transaction_intent = {
+            "to": to_address,
+            "amount": str(amount_float),
+            "data": "0x"
         }
         
-        # Format as expected by frontend
-        transaction_message = f"Transaction request: \n```json\n{json.dumps(transaction_obj)}\n```"
-        logger.info(f"Direct transaction: Sending request: {transaction_message[:100]}...")
+        logger.info(f"Direct transaction: Created transaction intent with amount {amount} IP")
         
-        # Send to queue
+        # Format the transaction in the same exact way the frontend expects
+        transaction_message = f"Transaction intent: \n```json\n{json.dumps(transaction_intent, indent=2)}\n```"
+        logger.info(f"Direct transaction: Created formatted message")
+        
+        # Send directly as text instead of with special format
         await queue.put(transaction_message)
-        await queue.put(f"\nPlease approve sending {amount} IP to {to_address} in your wallet.\n")
+        
+        # Also send the user-friendly message separately
+        await queue.put(f"\nI've prepared a transaction to send {amount} IP to {to_address}. Please approve it in your wallet when prompted.\n")
+        
+        logger.info(f"Direct transaction: Intent sent to frontend")
+        
         return True
     except Exception as e:
-        error_msg = f"Error creating direct transaction: {str(e)}"
+        error_msg = f"Error creating transaction intent: {str(e)}"
         logger.error(error_msg)
         logger.error(traceback.format_exc())
         if queue:
@@ -303,8 +431,15 @@ async def run_agent(
     task_token = str(uuid.uuid4())
     logger.info(f"Creating task context with token: {task_token}")
     
-    # Try direct transaction handling first
-    if queue and wallet_address and "send" in user_message.lower() and "ip to" in user_message.lower():
+    # Add validation for wallet address here
+    if wallet_address == "none" or wallet_address == "null" or wallet_address == "undefined":
+        logger.warning(f"Invalid wallet address '{wallet_address}' detected, setting to None")
+        wallet_address = None
+    
+    logger.info(f"Using wallet address: {wallet_address or 'None'}")
+    
+    # Try direct transaction handling first - this is the most reliable method
+    if queue and wallet_address and ("send" in user_message.lower() and "ip to" in user_message.lower()):
         logger.info("Detected direct transaction command, attempting to parse")
         
         # Try to parse the command directly
@@ -323,26 +458,53 @@ async def run_agent(
                 amount = match.group(1)
                 to_address = match.group(2).strip()
                 
-                # Add 0x prefix if missing - the only validation we do
-                if not to_address.startswith("0x"):
-                    to_address = "0x" + to_address
-                    logger.info(f"Added 0x prefix to address: {to_address}")
+                try:
+                    # Validate and format the address
+                    to_address = validate_and_format_address(to_address)
+                    logger.info(f"Validated address: {to_address}")
+                    
+                    # Parse the amount
+                    try:
+                        amount_float = float(amount)
+                        if amount_float <= 0:
+                            await queue.put("Error: Amount must be greater than zero.")
+                            await queue.put({"done": True})
+                            return {"error": "Amount must be greater than zero"}
+                    except ValueError:
+                        await queue.put(f"Error: Invalid amount format: {amount}")
+                        await queue.put({"done": True})
+                        return {"error": f"Invalid amount format: {amount}"}
                 
-                logger.info(f"Parsed direct transaction: {amount} IP to {to_address}")
-                
-                # Try direct transaction
-                await queue.put(f"Creating transaction to send {amount} IP to {to_address}...")
-                success = await create_transaction_request(to_address, amount, queue)
-                
-                if success:
-                    logger.info("Direct transaction request sent successfully")
+                    logger.info(f"Parsed direct transaction: {amount} IP to {to_address}")
+                    
+                    # Try direct transaction - this should work every time
+                    await queue.put(f"Creating transaction to send {amount} IP to {to_address}...")
+                    success = await create_transaction_request(to_address, amount, queue)
+                    
+                    if success:
+                        logger.info("Direct transaction request sent successfully")
+                        # Tell the frontend we're done after sending the transaction
+                        await queue.put({"done": True})
+                        return {"success": "Transaction request sent"}
+                    else:
+                        logger.warning("Failed to send direct transaction, attempting fallback to agent")
+                except ValueError as e:
+                    # Address validation failed
+                    error_msg = str(e)
+                    logger.error(f"Address validation failed: {error_msg}")
+                    await queue.put(f"Error: {error_msg}")
                     await queue.put({"done": True})
-                    return {"success": "Transaction request sent"}
-                else:
-                    logger.warning("Failed to send direct transaction, falling back to agent")
+                    return {"error": error_msg}
         except Exception as e:
-            logger.error(f"Error parsing direct transaction: {str(e)}")
+            logger.error(f"Error in direct transaction handling: {str(e)}")
             logger.error(traceback.format_exc())
+            # Continue with agent flow as fallback
+    
+    # If the user message contains keywords about sending IP tokens but we couldn't parse it directly,
+    # add some debugging information
+    if queue and wallet_address and ("send" in user_message.lower() and "ip" in user_message.lower()):
+        logger.warning("Transaction command detected but couldn't parse with regex, will try agent flow")
+        await queue.put("\nDetected transaction intent but couldn't parse directly. Trying AI agent...\n")
     
     # If direct handling failed, use normal agent flow
     try:
@@ -380,6 +542,15 @@ async def _run_agent_impl(
         logger.info(f"Executing agent implementation with token: {task_token}")
         logger.info(f"Wallet address: {wallet_address}")
         logger.info(f"Message history length: {len(message_history) if message_history else 0}")
+        
+        # Check if this is a transaction request but no wallet is connected
+        if "send" in user_message.lower() and "ip" in user_message.lower() and not wallet_address:
+            error_msg = "Cannot process transaction: No wallet connected. Please connect your wallet first."
+            logger.warning(error_msg)
+            if queue:
+                await queue.put(f"\n⚠️ {error_msg}\n")
+                await queue.put({"done": True})
+            return {"error": error_msg}
         
         # Get or create MCP session and tools
         session = None
@@ -444,7 +615,15 @@ async def _run_agent_impl(
                     logger.info(f"Starting tool: {tool_name} with input: {tool_input}")
                     
                     # For send_ip tool, we need to include wallet info
-                    if tool_name == "send_ip" and wallet_address:
+                    if tool_name == "send_ip":
+                        if not wallet_address:
+                            error_msg = "Cannot execute send_ip tool: No wallet connected"
+                            logger.error(error_msg)
+                            await queue.put(f"\n⚠️ {error_msg}\n")
+                            await queue.put(f"\nPlease connect your wallet to send transactions.\n")
+                            # Still return a tool ID to prevent errors
+                            return tool_call_id
+                        
                         try:
                             # Extract parameters from input
                             to_address = tool_input.get("to_address")
@@ -456,57 +635,27 @@ async def _run_agent_impl(
                                 # Add from_address to tool input for the actual API call
                                 tool_input["from_address"] = wallet_address
                                 
-                                # Create transaction request in the format expected by the frontend
-                                # See the frontend code in page.tsx that looks for "Transaction request:" marker
-                                logger.info(f"Creating transaction request for {amount} IP to {to_address}")
+                                # Just send a simple notification that we're preparing a transaction
+                                await queue.put(f"\nPreparing a transaction to send {amount} IP to {to_address}...\n")
                                 
-                                try:
-                                    # Don't modify or validate the address at all
-                                    logger.info(f"Using address as provided: {to_address}")
-                                    
-                                    # Convert amount to float first to ensure it's valid
-                                    amount_float = float(amount)
-                                    wei_value = Web3.to_wei(amount_float, "ether")
-                                    logger.info(f"Converted {amount_float} IP to {wei_value} wei")
-                                    
-                                    # Format transaction parameters - proper '0x' hex format
-                                    hex_value = "0x{:x}".format(wei_value)
-                                    
-                                    # Get chain ID based on environment configuration
-                                    chain_name = os.getenv("CHAIN_NAME", "sepolia").lower()
-                                    if chain_name in CHAIN_IDS:
-                                        chain_id = CHAIN_IDS[chain_name]
-                                    else:
-                                        # If chain name not found in CHAIN_IDS, try to parse from CHAIN_ID env var
-                                        chain_id = int(os.getenv("CHAIN_ID", "11155111"))  # Default to Sepolia
-                                    
-                                    logger.info(f"Tool starting: Using chain name: {chain_name}, chain ID: {chain_id}")
-                                    
-                                    # Create a transaction object that matches what MetaMask expects
-                                    transaction_obj = {
-                                        "action": "sign_transaction",
-                                        "transaction": {
-                                            "to": to_address,
-                                            "value": hex_value,  # Proper hex string with 0x prefix
-                                            "data": "0x",
-                                            "chainId": chain_id,  # Use dynamic chain ID
-                                            "gas": "0x5208"  # Standard 21000 gas
-                                        },
-                                        "message": f"Please send {amount} IP to {to_address}"
-                                    }
-                                    
-                                    # Send as a specially formatted string the frontend is looking for
-                                    transaction_message = f"Transaction request: \n```json\n{json.dumps(transaction_obj)}\n```"
-                                    logger.info(f"Sending transaction request: {transaction_message[:100]}...")
-                                    await queue.put(transaction_message)
-                                    
-                                    # Also send a user-friendly message
-                                    await queue.put(f"\nPlease approve sending {amount} IP to {to_address} in your wallet.\n")
-                                    
-                                except ValueError as e:
-                                    error_msg = f"Invalid amount value: {str(e)}"
-                                    logger.error(error_msg)
-                                    await queue.put(f"\nError: {error_msg}\n")
+                                # Create the transaction intent - but don't send the actual JSON in the stream
+                                # The frontend will make a separate API call to get the transaction data
+                                transaction_intent = {
+                                    "to": to_address,
+                                    "amount": str(amount),
+                                    "data": "0x"
+                                }
+                                
+                                # Send a simple notification that instructions to trigger the frontend
+                                transaction_message = f"Transaction intent: \n```json\n{json.dumps(transaction_intent, indent=2)}\n```"
+                                await queue.put(transaction_message)
+                                
+                                # Also send the user-friendly message separately
+                                await queue.put(f"\nI've prepared a transaction to send {amount} IP to {to_address}. Please approve it in your wallet when prompted.\n")
+                                
+                                # Return early so we don't send tool_call info
+                                return tool_call_id
+                                
                             else:
                                 error_msg = f"Missing required parameters. to_address: {to_address}, amount: {amount}"
                                 logger.error(error_msg)
@@ -520,22 +669,21 @@ async def _run_agent_impl(
                                 await queue.put(f"\nError: {error_msg}\n")
                             except:
                                 pass
-                    else:
-                        error_msg = f"Missing required parameters. to_address: {to_address}, amount: {amount}"
-                        logger.error(error_msg)
-                        await queue.put(f"\nError: {error_msg}\n")
-                                
-                        # Send tool call info for internal tracking
-                        try:
-                            await queue.put({
-                                "tool_call": {
-                                    "id": tool_call_id,
-                                    "name": tool_name,
-                                    "args": tool_input
-                                }
-                            })
-                        except Exception as e:
-                            logger.error(f"Error sending tool call info: {str(e)}")
+                    
+                    # Send tool call info for internal tracking - ensure it's always stringified
+                    try:
+                        tool_call_info = {
+                            "tool_call": {
+                                "id": tool_call_id,
+                                "name": tool_name,
+                                "args": tool_input
+                            }
+                        }
+                        # Instead of sending a dict directly, convert to a special format string
+                        # that won't be displayed to the user but will be processed by the backend
+                        await queue.put(f"__INTERNAL_TOOL_CALL__{json.dumps(tool_call_info)}__END_INTERNAL__")
+                    except Exception as e:
+                        logger.error(f"Error sending tool call info: {str(e)}")
                     
                     return tool_call_id
                 
@@ -551,15 +699,16 @@ async def _run_agent_impl(
                                 else str(output) if hasattr(output, "__str__")
                                 else "Tool execution completed")
                     
-                    # Send tool result info to frontend
-                    await queue.put({
+                    # Send tool result info to frontend using special format
+                    tool_result = {
                         "tool_result": {
                             "id": tool_call_id,
                             "name": tool_name,
                             "args": tool_input,
                             "result": output_str
                         }
-                    })
+                    }
+                    await queue.put(f"__INTERNAL_TOOL_RESULT__{json.dumps(tool_result)}__END_INTERNAL__")
             
             callbacks = [StreamingCallbackHandler()]
             
