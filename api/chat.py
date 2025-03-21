@@ -8,7 +8,6 @@ import uuid
 import logging
 import json
 import re
-import traceback
 
 from .mcp_agent import run_agent as run_blockscout_agent
 from .sdk_mcp_agent import run_agent as run_sdk_agent, create_transaction_request
@@ -35,6 +34,47 @@ class TransactionRequest(BaseModel):
     wallet_address: str
     private_key: Optional[str] = None
 
+def is_transaction_intent(message: str) -> bool:
+    """Detect if a message contains a transaction intent"""
+    # Simple pattern matching for 'send X IP to ADDRESS'
+    patterns = [
+        r"send\s+([0-9.]+)\s+ip\s+to\s+(0x[a-fA-F0-9]+)",
+        r"send\s+([0-9.]+)\s+ip\s+to\s+([a-fA-F0-9]+)",
+        r"send\s+([0-9.]+)\s+ip\s+to\s+(.*?)($|\s|\.)"
+    ]
+    
+    for pattern in patterns:
+        if re.search(pattern, message, re.IGNORECASE):
+            return True
+    return False
+
+def parse_transaction_details(message: str) -> dict:
+    """Extract transaction details from a message"""
+    # Try each pattern in order of specificity
+    patterns = [
+        r"send\s+([0-9.]+)\s+ip\s+to\s+(0x[a-fA-F0-9]+)",
+        r"send\s+([0-9.]+)\s+ip\s+to\s+([a-fA-F0-9]+)",
+        r"send\s+([0-9.]+)\s+ip\s+to\s+(.*?)($|\s|\.)"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match:
+            amount = match.group(1)
+            to_address = match.group(2).strip()
+            
+            # Ensure address has 0x prefix
+            if not to_address.startswith('0x'):
+                to_address = f"0x{to_address}"
+                
+            return {
+                "amount": amount,
+                "to_address": to_address
+            }
+    
+    # Default fallback - shouldn't reach here if is_transaction_intent is used first
+    return {"amount": "0", "to_address": "0x0"}
+
 async def stream_agent_response(
     messages: List[Message], 
     conversation_id: Optional[str] = None,
@@ -49,7 +89,6 @@ async def stream_agent_response(
     
     if not last_message:
         logger.warning("No user message found")
-        # Use plain text for error message
         yield "No user message found.\n"
         return
     
@@ -90,135 +129,24 @@ async def stream_agent_response(
     agent_task = asyncio.create_task(run_agent_task())
     
     try:
-        # Use simple text streaming - no JSON wrapping, no SSE format
-        logger.info(f"Starting raw text streaming for {mcp_type} MCP")
-        
         while True:
             item = await queue.get()
             
             if item is None:
-                logger.info("Received None item, ending stream")
+                logger.info("End of stream")
                 break
                 
             if isinstance(item, dict) and "error" in item:
-                error_message = f"Error: {item['error']}"
-                logger.info(f"Received error: {error_message}")
-                yield error_message
+                yield f"Error: {item['error']}"
                 break
-            elif isinstance(item, dict) and "tool_result" in item:
-                # Extract and stream formatted tool results
-                tool_result = item["tool_result"]["result"]
-                tool_name = item["tool_result"]["name"]
-                logger.info(f"Processing tool result from {tool_name}")
-                
-                # Special handling for get_stats tool results
-                if tool_name == "get_stats" and isinstance(tool_result, dict) and "content" in tool_result:
-                    # This handles the specific format of blockchain statistics
-                    logger.info("Processing get_stats tool result with content structure")
-                    content_items = tool_result["content"]
-                    for content_item in content_items:
-                        if isinstance(content_item, dict) and "text" in content_item:
-                            formatted_text = content_item["text"]
-                            logger.info(f"Extracted stats text: {formatted_text[:50]}...")
-                            yield formatted_text
-                else:
-                    # Handle general tool results
-                    if not isinstance(tool_result, str):
-                        # Check if this is a structured result with raw data
-                        if isinstance(tool_result, dict):
-                            # Try to extract only the meaningful text content
-                            if "raw_data" in tool_result and "content" in tool_result:
-                                logger.info("Found raw_data structure, extracting content")
-                                content = tool_result.get("content", [])
-                                extracted = False
-                                if isinstance(content, list):
-                                    for item in content:
-                                        if isinstance(item, dict) and "text" in item:
-                                            # Use just the text content, not the raw data
-                                            tool_result = item["text"]
-                                            extracted = True
-                                            break
-                                if not extracted:
-                                    # Convert to string but remove the raw_data section
-                                    tool_result_dict = dict(tool_result)
-                                    if "raw_data" in tool_result_dict:
-                                        del tool_result_dict["raw_data"]
-                                    tool_result = str(tool_result_dict)
-                            else:
-                                # Default conversion
-                                tool_result = str(tool_result)
-                        else:
-                            tool_result = str(tool_result)
-                    
-                    # Filter the result as we do with other strings
-                    filtered_result = ''.join(ch for ch in tool_result if ord(ch) >= 32 or ch in '\n\r\t')
-                    logger.info(f"Streaming tool result: {filtered_result[:50]}...")
-                    
-                    # Final check - don't send JSON objects directly to the client
-                    if filtered_result.startswith('{') and filtered_result.endswith('}'):
-                        try:
-                            data = json.loads(filtered_result)
-                            if "content" in data and isinstance(data["content"], list):
-                                for item in data["content"]:
-                                    if isinstance(item, dict) and "text" in item:
-                                        filtered_result = item["text"]
-                                        break
-                        except:
-                            pass
-                    
-                    yield filtered_result
-            elif isinstance(item, dict):
-                # For direct dictionary responses without going through tool_result
-                logger.info(f"Processing direct dictionary response: {str(item)[:50]}...")
-                
-                # If this is a direct API response like get_stats, extract the text
-                if "content" in item:
-                    logger.info("Direct response contains content field")
-                    content = item["content"]
-                    if isinstance(content, list):
-                        for content_item in content:
-                            if isinstance(content_item, dict) and "text" in content_item:
-                                text = content_item["text"]
-                                filtered_text = ''.join(ch for ch in text if ord(ch) >= 32 or ch in '\n\r\t')
-                                logger.info(f"Yielding text from content item: {filtered_text[:50]}...")
-                                yield filtered_text
-                                # Skip other processing
-                                continue
-                    elif isinstance(content, str):
-                        filtered_content = ''.join(ch for ch in content if ord(ch) >= 32 or ch in '\n\r\t')
-                        logger.info(f"Yielding content string: {filtered_content[:50]}...")
-                        yield filtered_content
-                        # Skip other processing
-                        continue
-                
-                # Skip other dictionary items that don't have text content we can extract
-                logger.info("Skipping dictionary item without extractable text content")
-                continue
-            elif isinstance(item, str):
-                # Check if this is a string containing direct JSON
-                if item.startswith('{') and ('"content":' in item or '"raw_data":' in item):
-                    logger.info("String appears to contain structured JSON data, attempting to extract text content")
-                    try:
-                        data = json.loads(item)
-                        if "content" in data and isinstance(data["content"], list):
-                            for content_item in data["content"]:
-                                if isinstance(content_item, dict) and "text" in content_item:
-                                    filtered_item = content_item["text"]
-                                    yield filtered_item
-                                    continue
-                    except:
-                        logger.warning("Failed to parse JSON from string", exc_info=True)
-                
-                # Proceed with normal string processing if not handled above
-                # Skip internal/control messages
-                if not (item.startswith('{') or item.startswith('e:{') or item.startswith('__INTERNAL')):
-                    # Simply yield the raw text without any JSON formatting or SSE data: prefix
-                    filtered_item = ''.join(ch for ch in item if ord(ch) >= 32 or ch in '\n\r\t')
-                    yield filtered_item
+            
+            if isinstance(item, str):
+                # Skip any JSON-like structures, but allow normal text through
+                if not (item.startswith('{') or item.startswith('e:{')):
+                    yield item
     
     except Exception as e:
         logger.error(f"Error in stream_agent_response: {str(e)}")
-        logger.error(traceback.format_exc())
         yield f"Error: {str(e)}"
             
     finally:
@@ -241,49 +169,21 @@ async def handle_chat(request: Request, protocol: str = Query('data')):
     # Get the last user message
     last_message = request.messages[-1].content if request.messages and request.messages[-1].role == "user" else ""
     
-    # Check if this is a transaction request for the SDK MCP
-    # ONLY for SDK MCP, not Storyscan
-    if mcp_type == "sdk" and wallet_address and ("send" in last_message.lower() and "ip to" in last_message.lower()):
-        logger.info("Detected SDK MCP transaction request, processing as JSON response")
+    # For SDK MCP: Quick check if this is a transaction request before running the full agent
+    if mcp_type == "sdk" and wallet_address and is_transaction_intent(last_message):
+        logger.info("Detected transaction intent in SDK MCP request")
+        tx_details = parse_transaction_details(last_message)
         
-        # Parse the transaction details
-        pattern = r"send\s+([0-9.]+)\s+ip\s+to\s+(0x[a-fA-F0-9]+)"
-        match = re.search(pattern, last_message, re.IGNORECASE)
-        
-        # Try alternative pattern if first one doesn't match
-        if not match:
-            logger.info("First pattern didn't match, trying alternative pattern")
-            # More lenient pattern that doesn't require 0x prefix
-            pattern = r"send\s+([0-9.]+)\s+ip\s+to\s+([a-fA-F0-9]+)"
-            match = re.search(pattern, last_message, re.IGNORECASE)
-            
-            # Even more lenient pattern as last resort
-            if not match:
-                pattern = r"send\s+([0-9.]+)\s+ip\s+to\s+(.*?)($|\s|\.)"
-                match = re.search(pattern, last_message, re.IGNORECASE)
-        
-        if match:
-            amount = match.group(1)
-            to_address = match.group(2).strip()
-            
-            # Ensure address has 0x prefix
-            if not to_address.startswith('0x'):
-                to_address = f"0x{to_address}"
-            
-            logger.info(f"Parsed transaction: {amount} IP to {to_address}")
-            
-            # Return a direct JSON response with transaction details
-            return JSONResponse(content={
-                "is_transaction": True,
-                "transaction_details": {
-                    "to_address": to_address,
-                    "amount": amount,
-                    "wallet_address": wallet_address
-                },
-                "message": f"I'll send {amount} IP to {to_address}. Please approve the transaction in your wallet."
-            })
-        else:
-            logger.warning("Transaction intent detected but couldn't parse the details")
+        # Return a JSON response with transaction details
+        return JSONResponse(content={
+            "is_transaction": True,
+            "transaction_details": {
+                "to_address": tx_details["to_address"],
+                "amount": tx_details["amount"],
+                "wallet_address": wallet_address
+            },
+            "message": f"I'll send {tx_details['amount']} IP to {tx_details['to_address']}. Please approve the transaction in your wallet."
+        })
     
     # For regular messages, use streaming
     return StreamingResponse(

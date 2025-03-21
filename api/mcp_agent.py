@@ -301,33 +301,35 @@ async def run_agent(
                             tool_input = kwargs.get("input", {})
                             
                             logger.info(f"Tool completed: {tool_name}")
-                            logger.debug(f"Tool output: {output}")
                             
-                            # Try to extract structured content properly
-                            if hasattr(output, "content"):
-                                output_str = output.content
-                            elif hasattr(output, "__str__"):
-                                output_str = str(output)
-                                # For stats and other structured responses, extract just the text
+                            try:
+                                # For structured content outputs
                                 if isinstance(output, dict) and "content" in output:
-                                    if isinstance(output["content"], list):
-                                        # Find text items in content
-                                        for item in output["content"]:
+                                    content = output["content"]
+                                    if isinstance(content, list):
+                                        # Special handling for content array format
+                                        output_str = ""
+                                        for item in content:
                                             if isinstance(item, dict) and "text" in item:
-                                                # Use the text directly
-                                                output_str = item["text"]
-                                                break
-                            else:
-                                output_str = "Tool execution completed"
-                            
-                            await queue.put({
-                                "tool_result": {
-                                    "id": tool_call_id,
-                                    "name": tool_name,
-                                    "args": tool_input,
-                                    "result": output_str
-                                }
-                            })
+                                                output_str += item["text"]
+                                            else:
+                                                output_str += str(item)
+                                    else:
+                                        output_str = str(content)
+                                else:
+                                    # Basic string extraction
+                                    output_str = (output.content if hasattr(output, "content")
+                                                else str(output) if hasattr(output, "__str__")
+                                                else "Tool execution completed")
+                                
+                                # Send the tool result to the queue
+                                await self.queue.put(f'content=\'{json.dumps({"content": output_str if not isinstance(output, dict) else output, "raw_data": output.get("raw_data", None) if isinstance(output, dict) else None})}\' name=\'{tool_name}\' tool_call_id=\'{tool_call_id}\'')
+                                
+                            except Exception as e:
+                                # Handle errors in processing tool output
+                                logger.error(f"Error in on_tool_end: {str(e)}")
+                                logger.error(traceback.format_exc())
+                                await self.queue.put(f'content=\'Error in tool execution: {str(e)}\' name=\'{tool_name}\' tool_call_id=\'{tool_call_id}\'')
                     
                     callbacks = [StreamingCallbackHandler()]
                     

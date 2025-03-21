@@ -270,30 +270,25 @@ async def get_or_create_mcp_session() -> Tuple[ClientSession, List[Any]]:
             
             raise RuntimeError(f"Failed to create MCP session: {str(e)}")
 
-model = ChatOpenAI(
-    model_name="gpt-4o",
-    temperature=0.9,
-)
+model = ChatOpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"), streaming=True)
 
-system_prompt = """You are StoryAI, a helpful AI assistant for the Story Protocol ecosystem.
-
-The user wants to send IP tokens to other addresses. Your main job is to help with this.
-
-IMPORTANT TRANSACTION INSTRUCTIONS:
-When a user messages you with ANY request that looks like sending tokens (e.g., "send 0.1 IP to 0x1234..."),
-you MUST IMMEDIATELY use the send_ip tool with these parameters:
-- to_address: The recipient's Ethereum address (must start with 0x)
-- amount: The amount of IP tokens to send (a number)
-
-Do NOT ask for user confirmation before using the send_ip tool - execute it immediately.
-Do NOT add any text before calling the send_ip tool - call it directly.
-If the address doesn't start with 0x, add it automatically.
-
-Example: User says "send 0.1 IP to 0x123..."
-You should immediately call:
-send_ip(to_address="0x123...", amount="0.1")
-
-NEVER respond with just text for any transaction request - ALWAYS use the send_ip tool directly.
+system_prompt = """
+    You are a specialized assistant focused on the Story protocol and blockchain capabilities. 
+    You can provide information about the Story protocol, IP tokens, blockchain technology, and can help users send IP tokens.
+    
+    Tools Provided:
+        - send_ip: Sends IP tokens from one address to another. This can be used to help users transfer their IP tokens on the blockchain.
+    
+    Transaction Capability:
+    When a user asks to "send X IP to ADDRESS", you'll help them initiate a blockchain transaction. The user will need to approve this transaction in their wallet.
+    
+    Example transaction commands:
+    - "Send 0.1 IP to 0x123456..."
+    - "Transfer 5 IP tokens to 0xabcdef..."
+    
+    If the request is unrelated to Story protocol, blockchain technology, IP tokens, or sending transactions, explain that you're a specialized assistant focused on the Story protocol and related blockchain functionality.
+    
+    Provide concise and clear responses. When helping with transactions, confirm the details before proceeding.
 """
 
 # Debug: Print confirmation
