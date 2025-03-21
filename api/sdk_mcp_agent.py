@@ -607,8 +607,41 @@ async def _run_agent_impl(
                 run_inline = True
                 
                 async def on_llm_new_token(self, token: str, **kwargs):
-                    logger.debug(f"LLM token: {token}")
-                    await queue.put(token)
+                    try:
+                        logger.debug(f"LLM token: {token}")
+                        
+                        # Skip tokens that are just whitespace or newlines
+                        if token.strip() == "":
+                            return
+                        
+                        # More aggressive filtering of control characters and escape sequences
+                        # that might break JSON or streaming format
+                        
+                        # First use a simple filter for common control chars
+                        filtered_token = ''.join(char for char in token if ord(char) >= 32 or char in '\n\r\t')
+                        
+                        # Then use regex to ensure only printable ASCII plus basic whitespace
+                        safe_token = re.sub(r'[^\x20-\x7E\n\r\t]', '', filtered_token)
+                        
+                        # Remove any potential JSON-breaking sequences
+                        safe_token = safe_token.replace('\\u', '\\\\u')
+                        safe_token = safe_token.replace('\\', '\\\\')
+                        
+                        # Verify the token can be safely serialized to JSON
+                        test_json = json.dumps({"text": safe_token})
+                        
+                        # If we get here, we know the token is safe for JSON
+                        await queue.put(safe_token)
+                    except Exception as e:
+                        logger.warning(f"Error processing token, skipping: {str(e)}")
+                        # Try even more aggressive filtering as a last resort
+                        try:
+                            # Only allow basic ASCII printable characters
+                            super_safe_token = re.sub(r'[^\x20-\x7E]', '', token)
+                            await queue.put(super_safe_token)
+                        except:
+                            # If all else fails, just skip this token
+                            pass
                 
                 async def on_tool_start(self, tool_name: str, tool_input: Dict[str, Any], **kwargs):
                     tool_call_id = str(uuid.uuid4())

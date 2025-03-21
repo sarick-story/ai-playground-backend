@@ -10,6 +10,7 @@ import json
 import uuid
 import traceback
 import sys
+import re
 from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -44,7 +45,29 @@ system_prompt = """
     Provide concise and clear analyses of findings using the available tools.
     Remember the coin is $IP (IP) and the data is coming from blockscout API. 
 
-    [IMPORTANT] You are a chatbot so try to make your responses as concise and clear as possible with minimal markdown formatting. [/IMPORTANT]
+    [IMPORTANT] Format blockchain statistics like this:
+    
+    **Blockchain Statistics:**
+    
+    - Total Blocks: [number]
+    - Average Block Time: [number] seconds
+    - Total Transactions: [number]
+    - Total Addresses: [number]
+    - IP Price: $[number]
+    - Market Cap: $[number]
+    - Network Utilization: [number]%
+    
+    **Gas Prices:**
+    
+    - Slow: [number] gwei
+    - Average: [number] gwei
+    - Fast: [number] gwei
+    
+    **Gas Used:**
+    
+    - Today: [number] gas
+    - Total Gas Used: [number] gas
+    [/IMPORTANT]
 """
 
 # Initialize memory store
@@ -224,8 +247,41 @@ async def run_agent(
                         run_inline = True
                         
                         async def on_llm_new_token(self, token: str, **kwargs):
-                            logger.debug(f"LLM token: {token}")
-                            await queue.put(token)
+                            try:
+                                logger.debug(f"LLM token: {token}")
+                                
+                                # Skip tokens that are just whitespace or newlines
+                                if token.strip() == "":
+                                    return
+                                
+                                # More aggressive filtering of control characters and escape sequences
+                                # that might break JSON or streaming format
+                                
+                                # First use a simple filter for common control chars
+                                filtered_token = ''.join(char for char in token if ord(char) >= 32 or char in '\n\r\t')
+                                
+                                # Then use regex to ensure only printable ASCII plus basic whitespace
+                                safe_token = re.sub(r'[^\x20-\x7E\n\r\t]', '', filtered_token)
+                                
+                                # Remove any potential JSON-breaking sequences
+                                safe_token = safe_token.replace('\\u', '\\\\u')
+                                safe_token = safe_token.replace('\\', '\\\\')
+                                
+                                # Verify the token can be safely serialized to JSON
+                                test_json = json.dumps({"text": safe_token})
+                                
+                                # If we get here, we know the token is safe for JSON
+                                await queue.put(safe_token)
+                            except Exception as e:
+                                logger.warning(f"Error processing token, skipping: {str(e)}")
+                                # Try even more aggressive filtering as a last resort
+                                try:
+                                    # Only allow basic ASCII printable characters
+                                    super_safe_token = re.sub(r'[^\x20-\x7E]', '', token)
+                                    await queue.put(super_safe_token)
+                                except:
+                                    # If all else fails, just skip this token
+                                    pass
                         
                         async def on_tool_start(self, tool_name: str, tool_input: Dict[str, Any], **kwargs):
                             tool_call_id = str(uuid.uuid4())
@@ -247,9 +303,22 @@ async def run_agent(
                             logger.info(f"Tool completed: {tool_name}")
                             logger.debug(f"Tool output: {output}")
                             
-                            output_str = (output.content if hasattr(output, "content")
-                                        else str(output) if hasattr(output, "__str__")
-                                        else "Tool execution completed")
+                            # Try to extract structured content properly
+                            if hasattr(output, "content"):
+                                output_str = output.content
+                            elif hasattr(output, "__str__"):
+                                output_str = str(output)
+                                # For stats and other structured responses, extract just the text
+                                if isinstance(output, dict) and "content" in output:
+                                    if isinstance(output["content"], list):
+                                        # Find text items in content
+                                        for item in output["content"]:
+                                            if isinstance(item, dict) and "text" in item:
+                                                # Use the text directly
+                                                output_str = item["text"]
+                                                break
+                            else:
+                                output_str = "Tool execution completed"
                             
                             await queue.put({
                                 "tool_result": {

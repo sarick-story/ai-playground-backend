@@ -1,5 +1,5 @@
 import os
-from typing import List, AsyncGenerator, Optional, Dict, Any
+from typing import List, AsyncGenerator, Optional
 from pydantic import BaseModel
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -8,6 +8,7 @@ import uuid
 import logging
 import json
 import re
+import traceback
 
 from .mcp_agent import run_agent as run_blockscout_agent
 from .sdk_mcp_agent import run_agent as run_sdk_agent, create_transaction_request
@@ -25,7 +26,7 @@ class Message(BaseModel):
 class Request(BaseModel):
     messages: List[Message]
     conversation_id: Optional[str] = None
-    mcp_type: Optional[str] = "storyscan"  # Default to storyscan instead of blockscout
+    mcp_type: Optional[str] = "storyscan"  # Default to storyscan
     wallet_address: Optional[str] = None    # Wallet address for SDK operations
 
 class TransactionRequest(BaseModel):
@@ -37,7 +38,7 @@ class TransactionRequest(BaseModel):
 async def stream_agent_response(
     messages: List[Message], 
     conversation_id: Optional[str] = None,
-    mcp_type: str = "storyscan",  # Change default here too
+    mcp_type: str = "storyscan",
     wallet_address: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
     """Stream the agent's response"""
@@ -48,6 +49,7 @@ async def stream_agent_response(
     
     if not last_message:
         logger.warning("No user message found")
+        # Use plain text for error message
         yield "No user message found.\n"
         return
     
@@ -88,39 +90,137 @@ async def stream_agent_response(
     agent_task = asyncio.create_task(run_agent_task())
     
     try:
+        # Use simple text streaming - no JSON wrapping, no SSE format
+        logger.info(f"Starting raw text streaming for {mcp_type} MCP")
+        
         while True:
             item = await queue.get()
             
             if item is None:
+                logger.info("Received None item, ending stream")
                 break
                 
-            if isinstance(item, dict):
-                if "error" in item:
-                    yield f"Error: {item['error']}\n"
-                    break
-                elif "done" in item:
-                    # Handle the done signal from the agent
-                    break
-                elif "tool_call" in item or "tool_result" in item:
-                    # Skip tool call/result objects - they are internal
-                    continue
-                # Forward any other dictionary items (like transaction requests) directly to the front-end
+            if isinstance(item, dict) and "error" in item:
+                error_message = f"Error: {item['error']}"
+                logger.info(f"Received error: {error_message}")
+                yield error_message
+                break
+            elif isinstance(item, dict) and "tool_result" in item:
+                # Extract and stream formatted tool results
+                tool_result = item["tool_result"]["result"]
+                tool_name = item["tool_result"]["name"]
+                logger.info(f"Processing tool result from {tool_name}")
+                
+                # Special handling for get_stats tool results
+                if tool_name == "get_stats" and isinstance(tool_result, dict) and "content" in tool_result:
+                    # This handles the specific format of blockchain statistics
+                    logger.info("Processing get_stats tool result with content structure")
+                    content_items = tool_result["content"]
+                    for content_item in content_items:
+                        if isinstance(content_item, dict) and "text" in content_item:
+                            formatted_text = content_item["text"]
+                            logger.info(f"Extracted stats text: {formatted_text[:50]}...")
+                            yield formatted_text
                 else:
-                    # Instead of forwarding the dictionary directly, convert it to a string
-                    # This ensures consistent data format for the frontend parser
-                    yield json.dumps(item)
+                    # Handle general tool results
+                    if not isinstance(tool_result, str):
+                        # Check if this is a structured result with raw data
+                        if isinstance(tool_result, dict):
+                            # Try to extract only the meaningful text content
+                            if "raw_data" in tool_result and "content" in tool_result:
+                                logger.info("Found raw_data structure, extracting content")
+                                content = tool_result.get("content", [])
+                                extracted = False
+                                if isinstance(content, list):
+                                    for item in content:
+                                        if isinstance(item, dict) and "text" in item:
+                                            # Use just the text content, not the raw data
+                                            tool_result = item["text"]
+                                            extracted = True
+                                            break
+                                if not extracted:
+                                    # Convert to string but remove the raw_data section
+                                    tool_result_dict = dict(tool_result)
+                                    if "raw_data" in tool_result_dict:
+                                        del tool_result_dict["raw_data"]
+                                    tool_result = str(tool_result_dict)
+                            else:
+                                # Default conversion
+                                tool_result = str(tool_result)
+                        else:
+                            tool_result = str(tool_result)
+                    
+                    # Filter the result as we do with other strings
+                    filtered_result = ''.join(ch for ch in tool_result if ord(ch) >= 32 or ch in '\n\r\t')
+                    logger.info(f"Streaming tool result: {filtered_result[:50]}...")
+                    
+                    # Final check - don't send JSON objects directly to the client
+                    if filtered_result.startswith('{') and filtered_result.endswith('}'):
+                        try:
+                            data = json.loads(filtered_result)
+                            if "content" in data and isinstance(data["content"], list):
+                                for item in data["content"]:
+                                    if isinstance(item, dict) and "text" in item:
+                                        filtered_result = item["text"]
+                                        break
+                        except:
+                            pass
+                    
+                    yield filtered_result
+            elif isinstance(item, dict):
+                # For direct dictionary responses without going through tool_result
+                logger.info(f"Processing direct dictionary response: {str(item)[:50]}...")
+                
+                # If this is a direct API response like get_stats, extract the text
+                if "content" in item:
+                    logger.info("Direct response contains content field")
+                    content = item["content"]
+                    if isinstance(content, list):
+                        for content_item in content:
+                            if isinstance(content_item, dict) and "text" in content_item:
+                                text = content_item["text"]
+                                filtered_text = ''.join(ch for ch in text if ord(ch) >= 32 or ch in '\n\r\t')
+                                logger.info(f"Yielding text from content item: {filtered_text[:50]}...")
+                                yield filtered_text
+                                # Skip other processing
+                                continue
+                    elif isinstance(content, str):
+                        filtered_content = ''.join(ch for ch in content if ord(ch) >= 32 or ch in '\n\r\t')
+                        logger.info(f"Yielding content string: {filtered_content[:50]}...")
+                        yield filtered_content
+                        # Skip other processing
+                        continue
+                
+                # Skip other dictionary items that don't have text content we can extract
+                logger.info("Skipping dictionary item without extractable text content")
+                continue
             elif isinstance(item, str):
-                # Check if this is a specially formatted tool call/result message
-                if item.startswith("__INTERNAL_TOOL_CALL__") and item.endswith("__END_INTERNAL__"):
-                    # Extract and process the internal tool call, but don't forward to the user
-                    continue
-                elif item.startswith("__INTERNAL_TOOL_RESULT__") and item.endswith("__END_INTERNAL__"):
-                    # Extract and process the internal tool result, but don't forward to the user
-                    continue
-                # For transaction intents, we'll just pass the regular formatted text
-                # and handle the transaction in a separate API endpoint
-                else:
-                    yield item
+                # Check if this is a string containing direct JSON
+                if item.startswith('{') and ('"content":' in item or '"raw_data":' in item):
+                    logger.info("String appears to contain structured JSON data, attempting to extract text content")
+                    try:
+                        data = json.loads(item)
+                        if "content" in data and isinstance(data["content"], list):
+                            for content_item in data["content"]:
+                                if isinstance(content_item, dict) and "text" in content_item:
+                                    filtered_item = content_item["text"]
+                                    yield filtered_item
+                                    continue
+                    except:
+                        logger.warning("Failed to parse JSON from string", exc_info=True)
+                
+                # Proceed with normal string processing if not handled above
+                # Skip internal/control messages
+                if not (item.startswith('{') or item.startswith('e:{') or item.startswith('__INTERNAL')):
+                    # Simply yield the raw text without any JSON formatting or SSE data: prefix
+                    filtered_item = ''.join(ch for ch in item if ord(ch) >= 32 or ch in '\n\r\t')
+                    yield filtered_item
+    
+    except Exception as e:
+        logger.error(f"Error in stream_agent_response: {str(e)}")
+        logger.error(traceback.format_exc())
+        yield f"Error: {str(e)}"
+            
     finally:
         if not agent_task.done():
             agent_task.cancel()
@@ -142,8 +242,9 @@ async def handle_chat(request: Request, protocol: str = Query('data')):
     last_message = request.messages[-1].content if request.messages and request.messages[-1].role == "user" else ""
     
     # Check if this is a transaction request for the SDK MCP
+    # ONLY for SDK MCP, not Storyscan
     if mcp_type == "sdk" and wallet_address and ("send" in last_message.lower() and "ip to" in last_message.lower()):
-        logger.info("Detected transaction request, redirecting to transaction endpoint")
+        logger.info("Detected SDK MCP transaction request, processing as JSON response")
         
         # Parse the transaction details
         pattern = r"send\s+([0-9.]+)\s+ip\s+to\s+(0x[a-fA-F0-9]+)"
@@ -184,7 +285,7 @@ async def handle_chat(request: Request, protocol: str = Query('data')):
         else:
             logger.warning("Transaction intent detected but couldn't parse the details")
     
-    # For non-transaction requests, continue with streaming as before
+    # For regular messages, use streaming
     return StreamingResponse(
         stream_agent_response(
             request.messages, 
@@ -198,6 +299,7 @@ async def handle_chat(request: Request, protocol: str = Query('data')):
             'Connection': 'keep-alive',
             'Content-Type': 'text/event-stream',
             'Transfer-Encoding': 'chunked',
+            'x-acme-stream-format': 'vercel-ai',
             'x-vercel-ai-data-stream': 'v1'
         }
     )
