@@ -180,9 +180,7 @@ async def run_agent(
         # Local development path (relative to parent directory)
         server_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
                               "story-mcp-hub/storyscan-mcp/server.py")
-    else:
-        # Docker environment - use absolute path from environment variable
-        server_path = "/app/story-mcp-hub/storyscan-mcp/server.py"
+    # If server_path exists from environment, use it as-is (no need to override)
 
     logger.info(f"Server path: {server_path}")
     
