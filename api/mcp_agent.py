@@ -180,9 +180,7 @@ async def run_agent(
         # Local development path (relative to parent directory)
         server_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
                               "story-mcp-hub/storyscan-mcp/server.py")
-    else:
-        # Docker environment - use absolute path from environment variable
-        server_path = "/app/story-mcp-hub/storyscan-mcp/server.py"
+    # If server_path exists from environment, use it as-is (no need to override)
 
     logger.info(f"Server path: {server_path}")
     
@@ -246,42 +244,31 @@ async def run_agent(
                     class StreamingCallbackHandler(BaseCallbackHandler):
                         run_inline = True
                         
+                        def __init__(self):
+                            super().__init__()
+                            self.queue = queue  # Store queue reference
+                        
                         async def on_llm_new_token(self, token: str, **kwargs):
                             try:
                                 logger.debug(f"LLM token: {token}")
                                 
-                                # Skip tokens that are just whitespace or newlines
-                                if token.strip() == "":
+                                # Skip empty tokens
+                                if not token:
                                     return
                                 
-                                # More aggressive filtering of control characters and escape sequences
-                                # that might break JSON or streaming format
+                                # Handle newlines properly - don't escape them
+                                # Just ensure the token is safe for streaming
+                                safe_token = token
                                 
-                                # First use a simple filter for common control chars
-                                filtered_token = ''.join(char for char in token if ord(char) >= 32 or char in '\n\r\t')
+                                # Only filter out problematic control characters, keep newlines
+                                safe_token = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', safe_token)
                                 
-                                # Then use regex to ensure only printable ASCII plus basic whitespace
-                                safe_token = re.sub(r'[^\x20-\x7E\n\r\t]', '', filtered_token)
-                                
-                                # Remove any potential JSON-breaking sequences
-                                safe_token = safe_token.replace('\\u', '\\\\u')
-                                safe_token = safe_token.replace('\\', '\\\\')
-                                
-                                # Verify the token can be safely serialized to JSON
-                                test_json = json.dumps({"text": safe_token})
-                                
-                                # If we get here, we know the token is safe for JSON
+                                # Send the token as-is (with proper newlines)
                                 await queue.put(safe_token)
                             except Exception as e:
                                 logger.warning(f"Error processing token, skipping: {str(e)}")
-                                # Try even more aggressive filtering as a last resort
-                                try:
-                                    # Only allow basic ASCII printable characters
-                                    super_safe_token = re.sub(r'[^\x20-\x7E]', '', token)
-                                    await queue.put(super_safe_token)
-                                except:
-                                    # If all else fails, just skip this token
-                                    pass
+                                # If there's an error, just skip this token
+                                pass
                         
                         async def on_tool_start(self, tool_name: str, tool_input: Dict[str, Any], **kwargs):
                             tool_call_id = str(uuid.uuid4())

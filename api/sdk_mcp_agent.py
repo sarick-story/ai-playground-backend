@@ -81,216 +81,139 @@ def validate_and_format_address(address: str) -> str:
     
     return address
 
-# Global variables for MCP state
-_mcp_session = None
-_mcp_tools = None
-_last_used = 0
-_lock = asyncio.Lock()
-_mcp_process = None
-
-async def get_or_create_mcp_session() -> Tuple[ClientSession, List[Any]]:
-    """Get or create MCP session by starting the MCP server as a subprocess."""
-    global _mcp_session, _mcp_tools, _last_used, _mcp_process
-    
-    async with _lock:
-        current_time = time.time()
-        
-        # Reuse existing session if it exists and was used recently (within 5 minutes)
-        if _mcp_session is not None and current_time - _last_used < 300:
-            logger.info("Reusing existing MCP session")
-            _last_used = current_time
-            return _mcp_session, _mcp_tools
+# Session creation is now embedded directly in _run_agent_impl
             
-        # Find the server path
-        server_path = os.environ.get("SDK_MCP_SERVER_PATH")
-        if not server_path:
-            # Try multiple possible locations for server.py
-            possible_paths = [
-                # Relative path from parent directory
-                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                             "story-mcp-hub/story-sdk-mcp/server.py"),
-                # Direct path based on workspace structure
-                "/Users/sarickshah/Documents/story/story-mcp-hub/story-sdk-mcp/server.py",
-                # Current directory
-                os.path.join(os.getcwd(), "story-mcp-hub/story-sdk-mcp/server.py"),
-                # One level up
-                os.path.join(os.path.dirname(os.getcwd()), "story-mcp-hub/story-sdk-mcp/server.py"),
-            ]
-            
-            # Try each path
-            for path in possible_paths:
-                logger.info(f"Checking for server.py at: {path}")
-                if os.path.exists(path):
-                    server_path = path
-                    logger.info(f"Found server.py at: {server_path}")
-                    break
-            
-            if not server_path:
-                error_msg = "Could not find server.py in any of the expected locations"
-                logger.error(error_msg)
-                raise FileNotFoundError(error_msg)
-        
-        logger.info(f"SDK MCP Server path: {server_path}")
-        
-        if not os.path.exists(server_path):
-            error_msg = f"SDK MCP server file not found at {server_path}"
-            logger.error(error_msg)
-            logger.error(f"Current directory: {os.getcwd()}")
-            logger.error(f"__file__: {__file__}")
-            logger.error(f"Parent dir: {os.path.dirname(os.path.dirname(__file__))}")
-            raise FileNotFoundError(error_msg)
-        
-        # Close existing session if any
-        if _mcp_session is not None:
-            logger.info("Closing existing MCP session")
-            try:
-                await _mcp_session.aclose()
-            except Exception as e:
-                logger.warning(f"Error closing existing session: {str(e)}")
-        
-        # Create server command
-        cmd = [sys.executable, server_path]
-        
-        try:
-            # Using a completely different approach - direct subprocess management
-            logger.info(f"Starting MCP server with command: {' '.join(cmd)}")
-            
-            # Start the process directly
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            if process.returncode is not None:
-                raise RuntimeError(f"Process failed to start with return code {process.returncode}")
-            
-            logger.info(f"Process started with PID: {process.pid}")
-            
-            # Store the process globally for cleanup
-            _mcp_process = process
-            
-            # Create a custom ClientSession implementation that works with asyncio streams
-            class AsyncioClientSession:
-                def __init__(self, process):
-                    self.process = process
-                    self.initialized = False
-                    self._id_counter = 0
-                
-                async def initialize(self):
-                    self.initialized = True
-                    return {"capabilities": {}}
-                
-                async def aclose(self):
-                    if self.process and self.process.returncode is None:
-                        self.process.terminate()
-                        try:
-                            await asyncio.wait_for(self.process.wait(), 2.0)
-                        except asyncio.TimeoutError:
-                            self.process.kill()
-                
-                async def execute_tool(self, tool_name, **kwargs):
-                    if not self.initialized:
-                        await self.initialize()
-                    
-                    # Create a JSON-RPC request
-                    self._id_counter += 1
-                    request = {
-                        "jsonrpc": "2.0",
-                        "id": self._id_counter,
-                        "method": "executeFunction",
-                        "params": {
-                            "name": tool_name,
-                            "args": kwargs
-                        }
-                    }
-                    
-                    # Send the request to the process
-                    json_request = json.dumps(request) + "\n"
-                    self.process.stdin.write(json_request.encode())
-                    await self.process.stdin.drain()
-                    
-                    # Read the response
-                    response_line = await self.process.stdout.readline()
-                    response = json.loads(response_line.decode().strip())
-                    
-                    # Check for errors
-                    if "error" in response:
-                        error = response["error"]
-                        raise RuntimeError(f"Tool execution error: {error.get('message', 'unknown error')}")
-                    
-                    # Return the result
-                    return response.get("result", None)
-            
-            # Create the custom session
-            session = AsyncioClientSession(process)
-            await session.initialize()
-            logger.info("MCP session initialized")
-            
-            # Create tool wrappers
-            tools = []
-            
-            # Add the send_ip tool
-            class SendIPTool:
-                name = "send_ip"
-                description = "Send IP tokens from one address to another"
-                
-                async def __call__(self, from_address=None, to_address=None, amount=None):
-                    logger.info(f"Executing send_ip tool: from={from_address}, to={to_address}, amount={amount}")
-                    return await session.execute_tool("send_ip", from_address=from_address, to_address=to_address, amount=amount)
-            
-            # Add the tool to the list
-            tools.append(SendIPTool())
-            logger.info(f"Created {len(tools)} tool wrappers")
-            
-            # Store session and tools for reuse
-            _mcp_session = session
-            _mcp_tools = tools
-            _last_used = time.time()
-            
-            return session, tools
-            
-        except Exception as e:
-            error_msg = f"Error creating MCP session: {str(e)}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
-            
-            # Clean up if needed
-            if _mcp_process and _mcp_process.returncode is None:
-                try:
-                    _mcp_process.terminate()
-                    await asyncio.wait_for(_mcp_process.wait(), 2.0)
-                except Exception as e2:
-                    logger.error(f"Error terminating process: {str(e2)}")
-                    try:
-                        _mcp_process.kill()
-                    except:
-                        pass
-            
-            raise RuntimeError(f"Failed to create MCP session: {str(e)}")
 
 model = ChatOpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"), streaming=True)
 
 system_prompt = """
-    You are a specialized assistant focused on the Story protocol and blockchain capabilities. 
-    You can provide information about the Story protocol, IP tokens, blockchain technology, and can help users send IP tokens.
+    You are a specialized Story Protocol SDK assistant focused on intellectual property management, NFT operations, and blockchain transactions on Story Protocol. 
+    Only handle actions directly related to Story Protocol IP management, NFT operations, royalties, disputes, and the tools provided.
+    
+    🤖 **CRITICAL WORKFLOW INSTRUCTION:**
+    ALWAYS follow the "🤖 AGENT WORKFLOW - FOLLOW THESE STEPS:" instructions found in tool docstrings. These are MANDATORY multi-step processes that must be completed in order. Never skip workflow steps or call tools directly without following their prescribed workflows.
+    
+    **Workflow Execution Rules:**
+    1. When a tool has "🤖 AGENT WORKFLOW" instructions, you MUST execute each step in sequence
+    2. Always call prerequisite functions (like get_license_minting_fee, get_spg_nft_contract_minting_fee_and_token) BEFORE the main function
+    3. Present fee/cost information to users for confirmation BEFORE proceeding with transactions
+    4. Wait for explicit user confirmation before executing blockchain transactions
+    5. Use the exact parameter names and values retrieved from prerequisite functions
     
     Tools Provided:
-        - send_ip: Sends IP tokens from one address to another. This can be used to help users transfer their IP tokens on the blockchain.
-    
-    Transaction Capability:
-    When a user asks to "send X IP to ADDRESS", you'll help them initiate a blockchain transaction. The user will need to approve this transaction in their wallet.
-    
-    Example transaction commands:
-    - "Send 0.1 IP to 0x123456..."
-    - "Transfer 5 IP tokens to 0xabcdef..."
-    
-    If the request is unrelated to Story protocol, blockchain technology, IP tokens, or sending transactions, explain that you're a specialized assistant focused on the Story protocol and related blockchain functionality.
-    
-    Provide concise and clear responses. When helping with transactions, confirm the details before proceeding.
-"""
 
+        **Core IP Management Tools:**
+        - get_license_terms: Retrieve license terms for a specific ID
+        - mint_and_register_ip_with_terms: Mint NFT, register as IP Asset, and attach PIL terms with automatic mint fee detection and WIP approval
+        - register: Register an existing NFT as an IP Asset
+        - attach_license_terms: Attach license terms to an existing IP Asset
+        - register_derivative: Register a derivative IP Asset with parent licenses and automatic WIP approval
+
+        **License Token Management Tools:**
+        - get_license_minting_fee: 🔍 PREREQUISITE - Get minting fee for license terms (REQUIRED before mint_license_tokens)
+        - get_license_revenue_share: 🔍 PREREQUISITE - Get revenue share for license terms (REQUIRED before mint_license_tokens)
+        - mint_license_tokens: 🚀 MAIN FUNCTION - Mint license tokens (REQUIRES workflow completion)
+
+        **IPFS & Metadata Tools:** (Available when PINATA_JWT configured)
+        - upload_image_to_ipfs: Upload images to IPFS using Pinata API
+        - create_ip_metadata: Create and upload both NFT and IP metadata to IPFS
+
+        **SPG NFT Collection Tools:**
+        - create_spg_nft_collection: Create new SPG NFT collections with custom mint fees, tokens, and settings
+        - get_spg_nft_contract_minting_fee_and_token: 🔍 PREREQUISITE - Get minting fee for SPG contracts (REQUIRED before mint_and_register_ip_with_terms with custom contract)
+
+        **Royalty Management Tools:**
+        - pay_royalty_on_behalf: Pay royalties on behalf of one IP to another with automatic WIP approval
+        - claim_all_revenue: Claim all revenue from child IPs of an ancestor IP
+
+        **Dispute Management Tools:**
+        - raise_dispute: Raise disputes against IP assets with bond payments and automatic WIP approval
+
+        **WIP (Wrapped IP) Token Tools:**
+        - deposit_wip: Wrap IP tokens to WIP tokens
+        - transfer_wip: Transfer WIP tokens to recipients
+    
+    **Enhanced Features:**
+    - 💰 **Automatic Token Approvals**: Most tools automatically handle WIP token approvals before transactions
+    - 🔧 **Multi-Token Support**: SPG collections support custom mint fee tokens (WIP, MERC20, custom ERC20)
+    - 🛡️ **Smart Fee Detection**: Automatic detection and handling of SPG contract mint fees
+    - ⚡ **Gasless Operations**: EIP-2612 permit support for advanced token operations
+
+    **Transaction Safety:**
+    ⚠️ All tools except those starting with `get_` will make blockchain transactions and change the blockchain state. Always confirm parameters with users before proceeding.
+
+
+    Methods starting with `get_` are safe to call—they do NOT make blockchain transactions or change the blockchain; they only retrieve information.
+
+    **OUTPUT FORMATTING REQUIREMENT:**
+    🖨️ ALWAYS print the complete return value from server.py methods exactly as returned - these are professionally formatted and contain all necessary information.
+    ✅ You MAY add helpful context, explanations, or next steps AFTER printing the server method's return value.
+    ❌ NEVER summarize, paraphrase, or reformat the server method's return value.
+    
+    **Example:**
+    [Server method returns: "✅ Successfully retrieved license terms! Here are the complete details:..."]
+    Agent: [Prints exact server output]
+    Agent: [Optional] "Would you like to mint license tokens using these terms?" or other helpful context
+
+    **Mandatory Multi-Step Workflows:**
+    
+    🔄 **For mint_license_tokens:**
+    1. ALWAYS call get_license_minting_fee(license_terms_id) first
+    2. ALWAYS call get_license_revenue_share(license_terms_id) second  
+    3. Present costs to user: "This license requires a minting fee of X wei (Y IP) and has Z% revenue share. Do you want to proceed?"
+    4. Wait for user confirmation before calling mint_license_tokens with retrieved values
+    
+    🔄 **For mint_and_register_ip_with_terms with custom SPG contract:**
+    1. IF spg_nft_contract is provided, ALWAYS call get_spg_nft_contract_minting_fee_and_token(spg_nft_contract) first
+    2. Present SPG fee info to user: "This SPG contract requires a minting fee of X wei (Y IP) using Z token. Do you want to proceed?"
+    3. Wait for user confirmation before calling mint_and_register_ip_with_terms with retrieved values
+
+    **WORKFLOW VALIDATION:**
+    - Before calling any function with "🤖 AGENT WORKFLOW" in its docstring, verify you have completed all prerequisite steps
+    - If a user asks you to call a function directly that requires a workflow, respond: "I need to follow the required workflow first. Let me check the fees/requirements and get your confirmation."
+    - Always explain what you're doing: "I'm checking the minting fee first as required by the workflow..."
+    - ALWAYS print the complete, unmodified return value from each server.py method call
+    - You may add helpful context AFTER printing the server's formatted output
+    
+    **EXAMPLE CORRECT WORKFLOW:**
+    User: "Mint license tokens for IP 0x123 with license terms ID 5"
+    Agent: "I need to follow the required workflow first. Let me check the minting fee and revenue share for license terms ID 5..."
+    Agent: [Calls get_license_minting_fee(5)]
+    Agent: [Prints complete server output: "Successfully retrieved minting fee information for License Terms ID 5:..."]
+    Agent: [Calls get_license_revenue_share(5)]
+    Agent: [Prints complete server output: "Successfully retrieved revenue share information for License Terms ID 5:..."]
+    Agent: "Based on the information above, do you want to proceed with minting the license tokens?"
+    User: "Yes, proceed"
+    Agent: [Calls mint_license_tokens with the retrieved values]
+    Agent: [Prints complete server output: "Successfully minted license tokens! Here's what happened:..."]
+
+    **Common Workflows:**
+    1. **Create Collection**: Use create_spg_nft_collection with custom mint fees
+    2. **Mint & Register IP**: Use mint_and_register_ip_with_terms for complete IP creation
+    3. **License Management**: Use mint_license_tokens and register_derivative for IP licensing
+    4. **Revenue Operations**: Use pay_royalty_on_behalf and claim_all_revenue for monetization
+
+    If the request is unrelated to Story Protocol, IP management, NFT operations, royalties, disputes, or the tools provided, return "I'm sorry, I can only help with Story Protocol IP management and blockchain operations using the tools I have access to. Check the information button for a list of available tools."
+    
+    **CRITICAL OUTPUT REQUIREMENT:**
+    📋 ALWAYS print the exact, complete return value from server.py methods - they contain professionally formatted information.
+    📋 You may add helpful commentary AFTER printing the server's output, but NEVER replace or summarize it.
+    
+Provide concise and clear analyses of operations using the available tools.
+    Remember the native token is $IP and wrapped version is WIP for transactions.
+
+    **Network Information:**
+    - Story Testnet (Aeneid): Chain ID 1513
+    - Explorer: https://aeneid.explorer.story.foundation
+    
+    **Token Addresses (ALWAYS use exact addresses, never token names):**
+    - WIP (Wrapped IP): 0x1514000000000000000000000000000000000000
+    - MERC20 (Test Token): 0xF2104833d386a2734a4eB3B8ad6FC6812F29E38E
+    
+    IMPORTANT: When users say "WIP", "MERC20", or token names, always convert to the full address above.
+
+
+"""
 # Debug: Print confirmation
 logger.info("SDK MCP agent initialized successfully")
 
@@ -369,6 +292,9 @@ async def create_transaction_request(to_address: str, amount: str, queue: asynci
                 pass
         return False
 
+# Global variable to track MCP session
+_mcp_session = None
+
 # Add this function to handle clean shutdown
 async def close_mcp_session():
     """Close the MCP session and terminate any subprocess."""
@@ -402,6 +328,7 @@ async def close_mcp_session():
 # Add these lines to ensure the session is properly closed when the application terminates
 def cleanup_session():
     """Synchronous cleanup function for atexit hook."""
+    global _mcp_session
     if _mcp_session is not None and hasattr(_mcp_session, '_process') and _mcp_session._process:
         try:
             logger.info(f"Terminating subprocess with PID: {_mcp_session._process.pid}")
@@ -547,232 +474,210 @@ async def _run_agent_impl(
                 await queue.put({"done": True})
             return {"error": error_msg}
         
-        # Get or create MCP session and tools
-        session = None
-        tools = None
+        # Create fresh MCP session and execute agent within session context
+        # Find the server path
+        server_path = os.environ.get("SDK_MCP_SERVER_PATH")
+        if not server_path:
+            # Try multiple possible locations for server.py
+            possible_paths = [
+                # Relative path from parent directory
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                             "story-mcp-hub/story-sdk-mcp/server.py"),
+            ]
+            
+            # Try each path
+            for path in possible_paths:
+                if os.path.exists(path):
+                    server_path = path
+                    break
+            
+            if not server_path:
+                error_msg = "Could not find story-sdk-mcp server.py"
+                logger.error(error_msg)
+                if queue:
+                    await queue.put(f"Error: {error_msg}")
+                    await queue.put({"done": True})
+                return {"error": error_msg}
         
+        logger.info(f"SDK MCP Server path: {server_path}")
+        
+        if not os.path.exists(server_path):
+            error_msg = f"SDK MCP server file not found at {server_path}"
+            logger.error(error_msg)
+            if queue:
+                await queue.put(f"Error: {error_msg}")
+                await queue.put({"done": True})
+            return {"error": error_msg}
+        
+        server_params = StdioServerParameters(
+            command="python",
+            args=[server_path],
+        )
+
         try:
-            session, tools = await get_or_create_mcp_session()
+            logger.info("Initializing stdio client")
+            async with stdio_client(server_params) as (read, write):
+                logger.info("Stdio client initialized, creating session")
+                async with ClientSession(read, write) as session:
+                    # Initialize the connection
+                    logger.info("Initializing MCP session")
+                    await session.initialize()
+                    logger.info("MCP session initialized successfully")
+
+                    # Load ALL MCP tools automatically using the proper LangChain MCP adapter
+                    logger.info("Loading MCP tools")
+                    tools = await load_mcp_tools(session)
+                    logger.info(f"Loaded {len(tools)} MCP tools")
+                    
+                    # Log tool names for debugging
+                    tool_names = [tool.name for tool in tools]
+                    logger.info(f"Available tools: {', '.join(tool_names)}")
+
+                    # Use ALL MCP tools from the Story Protocol SDK server
+                    if not tools:
+                        error_msg = "No MCP tools found, cannot process Story Protocol requests"
+                        logger.error(error_msg)
+                        if queue:
+                            await queue.put(f"Error: {error_msg}")
+                            await queue.put({"done": True})
+                        return {"error": error_msg}
+                    else:
+                        tool_names = [t.name for t in tools]
+                        logger.info(f"Using Story Protocol tools: {', '.join(tool_names)}")
+                    
+                    # Inject wallet address into tool context if provided
+                    if wallet_address:
+                        logger.info(f"Using wallet address: {wallet_address}")
+
+                    # Create agent with tools and message history
+                    logger.info("Creating agent with tools and system prompt")
+                    agent = create_react_agent(
+                        model,
+                        tools,
+                        state_modifier=system_prompt
+                    )
+
+                    # Prepare messages for agent
+                    messages = message_history or [{"role": "user", "content": user_message}]
+                    logger.info(f"Prepared {len(messages)} messages for the agent")
+
+                    if queue:
+                        # Define the streaming handler directly before using it
+                        class StreamingCallbackHandler(BaseCallbackHandler):
+                            run_inline = True
+                            
+                            async def on_llm_new_token(self, token: str, **kwargs):
+                                try:
+                                    logger.debug(f"LLM token: {token}")
+                                    
+                                    # Skip empty tokens
+                                    if not token:
+                                        return
+                                    
+                                    # Handle newlines properly - don't escape them
+                                    # Just ensure the token is safe for streaming
+                                    safe_token = token
+                                    
+                                    # Only filter out problematic control characters, keep newlines
+                                    safe_token = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', safe_token)
+                                    
+                                    # Send the token as-is (with proper newlines)
+                                    await queue.put(safe_token)
+                                except Exception as e:
+                                    logger.warning(f"Error processing token, skipping: {str(e)}")
+                                    # If there's an error, just skip this token
+                                    pass
+                            
+                            async def on_tool_start(self, serialized, input_dict, **kwargs):
+                                tool_call_id = str(kwargs.get("run_id", uuid.uuid4()))  # Convert UUID to string
+                                tool_name = serialized.get("name", "unknown_tool") 
+                                tool_description = serialized.get("description", "No description available")
+                                
+                                logger.info(f"Starting tool: {serialized} with input: {input_dict}")
+
+                                # Send tool call info to frontend using special format
+                                tool_call = {
+                                    "tool_call": {
+                                        "id": tool_call_id,
+                                        "name": {
+                                            "name": tool_name,
+                                            "description": tool_description
+                                        },
+                                        "args": json.dumps(input_dict)
+                                    }
+                                }
+                                # Don't send internal tool calls to user - they're for frontend processing only
+                                # await queue.put(f"__INTERNAL_TOOL_CALL__{json.dumps(tool_call)}__END_INTERNAL__")
+                            
+                            async def on_tool_end(self, output: str, **kwargs):
+                                tool_call_id = str(kwargs.get("run_id", uuid.uuid4()))  # Convert UUID to string
+                                tool_name = kwargs.get("name", "unknown_tool")
+                                tool_input = kwargs.get("input", {})
+                                
+                                logger.info(f"Tool completed: {tool_name}")
+                                logger.debug(f"Tool output: {output}")
+                                
+                                output_str = (output.content if hasattr(output, "content")
+                                            else str(output) if hasattr(output, "__str__")
+                                            else "Tool execution completed")
+                                
+                                # Send tool result info to frontend using special format
+                                tool_result = {
+                                    "tool_result": {
+                                        "id": tool_call_id,
+                                        "name": tool_name,
+                                        "args": tool_input,
+                                        "result": output_str
+                                    }
+                                }
+
+                                # Don't send internal tool results to user - they're for frontend processing only
+                                # await queue.put(f"__INTERNAL_TOOL_RESULT__{json.dumps(tool_result)}__END_INTERNAL__")
+                        
+                        callbacks = [StreamingCallbackHandler()]
+                        
+                        # Run agent with streaming
+                        logger.info(f"Starting SDK MCP agent with streaming in task context: {task_token}")
+                        try:
+                            result = await agent.ainvoke(
+                                {"messages": messages},
+                                config={"callbacks": callbacks}
+                            )
+                            logger.info("SDK MCP agent completed execution with streaming")
+                            logger.info(f"Agent result: {result}")
+                            await queue.put({"done": True})
+                            return result
+                        except Exception as e:
+                            error_msg = f"Error during agent execution: {str(e)}"
+                            logger.error(error_msg)
+                            logger.error(traceback.format_exc())
+                            await queue.put(f"\nError: {error_msg}\n")
+                            await queue.put({"done": True})
+                            return {"error": error_msg}
+                    
+                    else:
+                        # Run without streaming
+                        logger.info("Starting SDK MCP agent without streaming")
+                        try:
+                            result = await agent.ainvoke({"messages": messages})
+                            logger.info("SDK MCP agent completed execution without streaming")
+                            logger.info(f"Agent result: {result}")
+                            return result
+                        except Exception as e:
+                            error_msg = f"Error during agent execution: {str(e)}"
+                            logger.error(error_msg)
+                            logger.error(traceback.format_exc())
+                            return {"error": error_msg}
+        
         except Exception as e:
             error_msg = f"Failed to create MCP session: {str(e)}"
             logger.error(error_msg)
+            logger.error(traceback.format_exc())
             if queue:
                 await queue.put(f"Error: {error_msg}")
                 await queue.put({"done": True})
             return {"error": error_msg}
-
-        # Filter for just the send_ip tool
-        send_ip_tool = [tool for tool in tools if tool.name == "send_ip"]
         
-        if not send_ip_tool:
-            error_msg = "send_ip tool not found, cannot process transaction request"
-            logger.error(error_msg)
-            if queue:
-                await queue.put(f"Error: {error_msg}")
-                await queue.put({"done": True})
-            return {"error": error_msg}
-        else:
-            tool_names = [t.name for t in send_ip_tool]
-            logger.info(f"Found send_ip tool: {tool_names}")
-        
-        # Inject wallet address into tool context if provided
-        if wallet_address:
-            logger.info(f"Using wallet address: {wallet_address}")
-            # If our initial message is directly about sending tokens, add a debug message
-            if "send" in user_message.lower() and "ip" in user_message.lower():
-                logger.info("DETECTED TOKEN SEND REQUEST - SHOULD TRIGGER SEND_IP TOOL")
-                if queue:
-                    await queue.put("\nDetected token send request. Processing...\n")
-
-        # Create agent with tools and message history
-        logger.info("Creating agent with tools and system prompt")
-        agent = create_react_agent(
-            model,
-            send_ip_tool,
-            state_modifier=system_prompt
-        )
-
-        # Prepare messages for agent
-        messages = message_history or [{"role": "user", "content": user_message}]
-        logger.info(f"Prepared {len(messages)} messages for the agent")
-        
-        if queue:
-            # Define the streaming handler directly before using it
-            class StreamingCallbackHandler(BaseCallbackHandler):
-                run_inline = True
-                
-                async def on_llm_new_token(self, token: str, **kwargs):
-                    try:
-                        logger.debug(f"LLM token: {token}")
-                        
-                        # Skip tokens that are just whitespace or newlines
-                        if token.strip() == "":
-                            return
-                        
-                        # More aggressive filtering of control characters and escape sequences
-                        # that might break JSON or streaming format
-                        
-                        # First use a simple filter for common control chars
-                        filtered_token = ''.join(char for char in token if ord(char) >= 32 or char in '\n\r\t')
-                        
-                        # Then use regex to ensure only printable ASCII plus basic whitespace
-                        safe_token = re.sub(r'[^\x20-\x7E\n\r\t]', '', filtered_token)
-                        
-                        # Remove any potential JSON-breaking sequences
-                        safe_token = safe_token.replace('\\u', '\\\\u')
-                        safe_token = safe_token.replace('\\', '\\\\')
-                        
-                        # Verify the token can be safely serialized to JSON
-                        test_json = json.dumps({"text": safe_token})
-                        
-                        # If we get here, we know the token is safe for JSON
-                        await queue.put(safe_token)
-                    except Exception as e:
-                        logger.warning(f"Error processing token, skipping: {str(e)}")
-                        # Try even more aggressive filtering as a last resort
-                        try:
-                            # Only allow basic ASCII printable characters
-                            super_safe_token = re.sub(r'[^\x20-\x7E]', '', token)
-                            await queue.put(super_safe_token)
-                        except:
-                            # If all else fails, just skip this token
-                            pass
-                
-                async def on_tool_start(self, tool_name: str, tool_input: Dict[str, Any], **kwargs):
-                    tool_call_id = str(uuid.uuid4())
-                    logger.info(f"Starting tool: {tool_name} with input: {tool_input}")
-                    
-                    # For send_ip tool, we need to include wallet info
-                    if tool_name == "send_ip":
-                        if not wallet_address:
-                            error_msg = "Cannot execute send_ip tool: No wallet connected"
-                            logger.error(error_msg)
-                            await queue.put(f"\n⚠️ {error_msg}\n")
-                            await queue.put(f"\nPlease connect your wallet to send transactions.\n")
-                            # Still return a tool ID to prevent errors
-                            return tool_call_id
-                        
-                        try:
-                            # Extract parameters from input
-                            to_address = tool_input.get("to_address")
-                            amount = tool_input.get("amount")
-                            
-                            logger.info(f"Processing send_ip request to {to_address} for {amount} IP")
-                            
-                            if to_address and amount:
-                                # Add from_address to tool input for the actual API call
-                                tool_input["from_address"] = wallet_address
-                                
-                                # Just send a simple notification that we're preparing a transaction
-                                await queue.put(f"\nPreparing a transaction to send {amount} IP to {to_address}...\n")
-                                
-                                # Create the transaction intent - but don't send the actual JSON in the stream
-                                # The frontend will make a separate API call to get the transaction data
-                                transaction_intent = {
-                                    "to": to_address,
-                                    "amount": str(amount),
-                                    "data": "0x"
-                                }
-                                
-                                # Send a simple notification that instructions to trigger the frontend
-                                transaction_message = f"Transaction intent: \n```json\n{json.dumps(transaction_intent, indent=2)}\n```"
-                                await queue.put(transaction_message)
-                                
-                                # Also send the user-friendly message separately
-                                await queue.put(f"\nI've prepared a transaction to send {amount} IP to {to_address}. Please approve it in your wallet when prompted.\n")
-                                
-                                # Return early so we don't send tool_call info
-                                return tool_call_id
-                                
-                            else:
-                                error_msg = f"Missing required parameters. to_address: {to_address}, amount: {amount}"
-                                logger.error(error_msg)
-                                await queue.put(f"\nError: {error_msg}\n")
-                                
-                        except Exception as e:
-                            error_msg = f"Error preparing transaction: {str(e)}"
-                            logger.error(error_msg)
-                            logger.error(traceback.format_exc())
-                            try:
-                                await queue.put(f"\nError: {error_msg}\n")
-                            except:
-                                pass
-                    
-                    # Send tool call info for internal tracking - ensure it's always stringified
-                    try:
-                        tool_call_info = {
-                            "tool_call": {
-                                "id": tool_call_id,
-                                "name": tool_name,
-                                "args": tool_input
-                            }
-                        }
-                        # Instead of sending a dict directly, convert to a special format string
-                        # that won't be displayed to the user but will be processed by the backend
-                        await queue.put(f"__INTERNAL_TOOL_CALL__{json.dumps(tool_call_info)}__END_INTERNAL__")
-                    except Exception as e:
-                        logger.error(f"Error sending tool call info: {str(e)}")
-                    
-                    return tool_call_id
-                
-                async def on_tool_end(self, output: str, **kwargs):
-                    tool_call_id = kwargs.get("run_id", str(uuid.uuid4()))
-                    tool_name = kwargs.get("name", "unknown_tool")
-                    tool_input = kwargs.get("input", {})
-                    
-                    logger.info(f"Tool completed: {tool_name}")
-                    logger.debug(f"Tool output: {output}")
-                    
-                    output_str = (output.content if hasattr(output, "content")
-                                else str(output) if hasattr(output, "__str__")
-                                else "Tool execution completed")
-                    
-                    # Send tool result info to frontend using special format
-                    tool_result = {
-                        "tool_result": {
-                            "id": tool_call_id,
-                            "name": tool_name,
-                            "args": tool_input,
-                            "result": output_str
-                        }
-                    }
-                    await queue.put(f"__INTERNAL_TOOL_RESULT__{json.dumps(tool_result)}__END_INTERNAL__")
-            
-            callbacks = [StreamingCallbackHandler()]
-            
-            # Run agent with streaming
-            logger.info(f"Starting SDK MCP agent with streaming in task context: {task_token}")
-            try:
-                result = await agent.ainvoke(
-                    {"messages": messages},
-                    config={"callbacks": callbacks}
-                )
-                logger.info("SDK MCP agent completed execution with streaming")
-                logger.info(f"Agent result: {result}")
-                await queue.put({"done": True})
-                return result
-            except Exception as e:
-                error_msg = f"Error during agent execution: {str(e)}"
-                logger.error(error_msg)
-                logger.error(traceback.format_exc())
-                await queue.put(f"\nError: {error_msg}\n")
-                await queue.put({"done": True})
-                return {"error": error_msg}
-        
-        else:
-            # Run without streaming
-            logger.info("Starting SDK MCP agent without streaming")
-            try:
-                result = await agent.ainvoke({"messages": messages})
-                logger.info("SDK MCP agent completed execution without streaming")
-                logger.info(f"Agent result: {result}")
-                return result
-            except Exception as e:
-                error_msg = f"Error during agent execution: {str(e)}"
-                logger.error(error_msg)
-                logger.error(traceback.format_exc())
-                return {"error": error_msg}
-            
     except Exception as e:
         logger.error(f"Error in _run_agent_impl: {str(e)}")
         logger.error(traceback.format_exc())
