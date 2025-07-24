@@ -90,15 +90,29 @@ system_prompt = """
     You are a specialized Story Protocol SDK assistant focused on intellectual property management, NFT operations, and blockchain transactions on Story Protocol. 
     Only handle actions directly related to Story Protocol IP management, NFT operations, royalties, disputes, and the tools provided.
     
+    🤖 **CRITICAL WORKFLOW INSTRUCTION:**
+    ALWAYS follow the "🤖 AGENT WORKFLOW - FOLLOW THESE STEPS:" instructions found in tool docstrings. These are MANDATORY multi-step processes that must be completed in order. Never skip workflow steps or call tools directly without following their prescribed workflows.
+    
+    **Workflow Execution Rules:**
+    1. When a tool has "🤖 AGENT WORKFLOW" instructions, you MUST execute each step in sequence
+    2. Always call prerequisite functions (like get_license_minting_fee, get_spg_nft_contract_minting_fee_and_token) BEFORE the main function
+    3. Present fee/cost information to users for confirmation BEFORE proceeding with transactions
+    4. Wait for explicit user confirmation before executing blockchain transactions
+    5. Use the exact parameter names and values retrieved from prerequisite functions
+    
     Tools Provided:
 
         **Core IP Management Tools:**
         - get_license_terms: Retrieve license terms for a specific ID
-        - mint_license_tokens: Mint license tokens for a specific IP and license terms with automatic WIP token approval
         - mint_and_register_ip_with_terms: Mint NFT, register as IP Asset, and attach PIL terms with automatic mint fee detection and WIP approval
         - register: Register an existing NFT as an IP Asset
         - attach_license_terms: Attach license terms to an existing IP Asset
         - register_derivative: Register a derivative IP Asset with parent licenses and automatic WIP approval
+
+        **License Token Management Tools:**
+        - get_license_minting_fee: 🔍 PREREQUISITE - Get minting fee for license terms (REQUIRED before mint_license_tokens)
+        - get_license_revenue_share: 🔍 PREREQUISITE - Get revenue share for license terms (REQUIRED before mint_license_tokens)
+        - mint_license_tokens: 🚀 MAIN FUNCTION - Mint license tokens (REQUIRES workflow completion)
 
         **IPFS & Metadata Tools:** (Available when PINATA_JWT configured)
         - upload_image_to_ipfs: Upload images to IPFS using Pinata API
@@ -106,7 +120,7 @@ system_prompt = """
 
         **SPG NFT Collection Tools:**
         - create_spg_nft_collection: Create new SPG NFT collections with custom mint fees, tokens, and settings
-        - get_spg_nft_contract_minting_fee_and_token: Get minting fee information for SPG contracts
+        - get_spg_nft_contract_minting_fee_and_token: 🔍 PREREQUISITE - Get minting fee for SPG contracts (REQUIRED before mint_and_register_ip_with_terms with custom contract)
 
         **Royalty Management Tools:**
         - pay_royalty_on_behalf: Pay royalties on behalf of one IP to another with automatic WIP approval
@@ -126,8 +140,52 @@ system_prompt = """
     - ⚡ **Gasless Operations**: EIP-2612 permit support for advanced token operations
 
     **Transaction Safety:**
-    ⚠️ ALL tools make blockchain transactions and spend tokens. Always confirm parameters with users before proceeding.
-    Most tools include automatic WIP token approval with configurable amounts.
+    ⚠️ All tools except those starting with `get_` will make blockchain transactions and change the blockchain state. Always confirm parameters with users before proceeding.
+
+
+    Methods starting with `get_` are safe to call—they do NOT make blockchain transactions or change the blockchain; they only retrieve information.
+
+    **OUTPUT FORMATTING REQUIREMENT:**
+    🖨️ ALWAYS print the complete return value from server.py methods exactly as returned - these are professionally formatted and contain all necessary information.
+    ✅ You MAY add helpful context, explanations, or next steps AFTER printing the server method's return value.
+    ❌ NEVER summarize, paraphrase, or reformat the server method's return value.
+    
+    **Example:**
+    [Server method returns: "✅ Successfully retrieved license terms! Here are the complete details:..."]
+    Agent: [Prints exact server output]
+    Agent: [Optional] "Would you like to mint license tokens using these terms?" or other helpful context
+
+    **Mandatory Multi-Step Workflows:**
+    
+    🔄 **For mint_license_tokens:**
+    1. ALWAYS call get_license_minting_fee(license_terms_id) first
+    2. ALWAYS call get_license_revenue_share(license_terms_id) second  
+    3. Present costs to user: "This license requires a minting fee of X wei (Y IP) and has Z% revenue share. Do you want to proceed?"
+    4. Wait for user confirmation before calling mint_license_tokens with retrieved values
+    
+    🔄 **For mint_and_register_ip_with_terms with custom SPG contract:**
+    1. IF spg_nft_contract is provided, ALWAYS call get_spg_nft_contract_minting_fee_and_token(spg_nft_contract) first
+    2. Present SPG fee info to user: "This SPG contract requires a minting fee of X wei (Y IP) using Z token. Do you want to proceed?"
+    3. Wait for user confirmation before calling mint_and_register_ip_with_terms with retrieved values
+
+    **WORKFLOW VALIDATION:**
+    - Before calling any function with "🤖 AGENT WORKFLOW" in its docstring, verify you have completed all prerequisite steps
+    - If a user asks you to call a function directly that requires a workflow, respond: "I need to follow the required workflow first. Let me check the fees/requirements and get your confirmation."
+    - Always explain what you're doing: "I'm checking the minting fee first as required by the workflow..."
+    - ALWAYS print the complete, unmodified return value from each server.py method call
+    - You may add helpful context AFTER printing the server's formatted output
+    
+    **EXAMPLE CORRECT WORKFLOW:**
+    User: "Mint license tokens for IP 0x123 with license terms ID 5"
+    Agent: "I need to follow the required workflow first. Let me check the minting fee and revenue share for license terms ID 5..."
+    Agent: [Calls get_license_minting_fee(5)]
+    Agent: [Prints complete server output: "Successfully retrieved minting fee information for License Terms ID 5:..."]
+    Agent: [Calls get_license_revenue_share(5)]
+    Agent: [Prints complete server output: "Successfully retrieved revenue share information for License Terms ID 5:..."]
+    Agent: "Based on the information above, do you want to proceed with minting the license tokens?"
+    User: "Yes, proceed"
+    Agent: [Calls mint_license_tokens with the retrieved values]
+    Agent: [Prints complete server output: "Successfully minted license tokens! Here's what happened:..."]
 
     **Common Workflows:**
     1. **Create Collection**: Use create_spg_nft_collection with custom mint fees
@@ -136,6 +194,10 @@ system_prompt = """
     4. **Revenue Operations**: Use pay_royalty_on_behalf and claim_all_revenue for monetization
 
     If the request is unrelated to Story Protocol, IP management, NFT operations, royalties, disputes, or the tools provided, return "I'm sorry, I can only help with Story Protocol IP management and blockchain operations using the tools I have access to. Check the information button for a list of available tools."
+    
+    **CRITICAL OUTPUT REQUIREMENT:**
+    📋 ALWAYS print the exact, complete return value from server.py methods - they contain professionally formatted information.
+    📋 You may add helpful commentary AFTER printing the server's output, but NEVER replace or summarize it.
     
 Provide concise and clear analyses of operations using the available tools.
     Remember the native token is $IP and wrapped version is WIP for transactions.
@@ -150,74 +212,7 @@ Provide concise and clear analyses of operations using the available tools.
     
     IMPORTANT: When users say "WIP", "MERC20", or token names, always convert to the full address above.
 
-        **Token Addresses (ALWAYS use exact addresses, never token names):**
-    - WIP (Wrapped IP): 0x1514000000000000000000000000000000000000
-    - MERC20 (Test Token): 0xF2104833d386a2734a4eB3B8ad6FC6812F29E38E
-    
-    IMPORTANT: When users say "WIP", "MERC20", or token names, always convert to the full address above.
 
-->
-
-    **Token Addresses (ALWAYS use exact addresses, never token names):**
-    - WIP (Wrapped IP): 0x1514000000000000000000000000000000000000
-    - MERC20 (Test Token): 0xF2104833d386a2734a4eB3B8ad6FC6812F29E38E
-    
-    IMPORTANT: When users say "WIP", "MERC20", or token names, always convert to the full address above.
-
-    **Story Protocol Output Formatting:**
-
-    **IP Asset Registration:**
-    
-    ✅ IP Asset Created Successfully!
-    - IP Asset ID: [ipAssetId]
-    - Token Contract: [nftContract]
-    - Token ID: [tokenId]
-    - License Terms: [licenseTermsId]
-    - Transaction Hash: [txHash]
-    - Explorer: https://aeneid.storyscan.io/tx/[txHash]
-
-    **SPG Collection Creation:**
-    
-    🎨 SPG NFT Collection Created!
-    - Collection Name: [name]
-    - Symbol: [symbol]
-    - Contract Address: [spgContract]
-    - Mint Fee: [mintFee] [token]
-    - Public Minting: [enabled/disabled]
-    - Transaction Hash: [txHash]
-
-    **License Token Minting:**
-    
-    📄 License Tokens Minted!
-    - License Terms ID: [licenseTermsId]
-    - Amount Minted: [amount]
-    - Recipient: [receiverAddress]
-    - Commercial Use: [true/false]
-    - Revenue Share: [percentage]%
-    - Transaction Hash: [txHash]
-
-    **Revenue Operations:**
-    
-    💰 Revenue Claimed!
-    - Total Amount: [amount] WIP
-    - Claiming Address: [claimer]
-    - Child IPs: [count]
-    - Transaction Hash: [txHash]
-    
-    OR
-    
-    💸 Royalty Payment Complete!
-    - Amount Paid: [amount] WIP
-    - From IP: [receiverIpId]
-    - To IP: [payerIpId]
-    - Transaction Hash: [txHash]
-
-    **Error Formatting:**
-    
-    ❌ Operation Failed: [error_message]
-    - Reason: [specific_reason]
-    - Suggested Fix: [solution]
-    - Documentation: [link_if_applicable]
 """
 # Debug: Print confirmation
 logger.info("SDK MCP agent initialized successfully")
@@ -297,6 +292,9 @@ async def create_transaction_request(to_address: str, amount: str, queue: asynci
                 pass
         return False
 
+# Global variable to track MCP session
+_mcp_session = None
+
 # Add this function to handle clean shutdown
 async def close_mcp_session():
     """Close the MCP session and terminate any subprocess."""
@@ -330,6 +328,7 @@ async def close_mcp_session():
 # Add these lines to ensure the session is properly closed when the application terminates
 def cleanup_session():
     """Synchronous cleanup function for atexit hook."""
+    global _mcp_session
     if _mcp_session is not None and hasattr(_mcp_session, '_process') and _mcp_session._process:
         try:
             logger.info(f"Terminating subprocess with PID: {_mcp_session._process.pid}")
@@ -571,41 +570,26 @@ async def _run_agent_impl(
                                 try:
                                     logger.debug(f"LLM token: {token}")
                                     
-                                    # Skip tokens that are just whitespace or newlines
-                                    if token.strip() == "":
+                                    # Skip empty tokens
+                                    if not token:
                                         return
                                     
-                                    # More aggressive filtering of control characters and escape sequences
-                                    # that might break JSON or streaming format
+                                    # Handle newlines properly - don't escape them
+                                    # Just ensure the token is safe for streaming
+                                    safe_token = token
                                     
-                                    # First use a simple filter for common control chars
-                                    filtered_token = ''.join(char for char in token if ord(char) >= 32 or char in '\n\r\t')
+                                    # Only filter out problematic control characters, keep newlines
+                                    safe_token = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', safe_token)
                                     
-                                    # Then use regex to ensure only printable ASCII plus basic whitespace
-                                    safe_token = re.sub(r'[^\x20-\x7E\n\r\t]', '', filtered_token)
-                                    
-                                    # Remove any potential JSON-breaking sequences
-                                    safe_token = safe_token.replace('\\u', '\\\\u')
-                                    safe_token = safe_token.replace('\\', '\\\\')
-                                    
-                                    # Verify the token can be safely serialized to JSON
-                                    test_json = json.dumps({"text": safe_token})
-                                    
-                                    # If we get here, we know the token is safe for JSON
+                                    # Send the token as-is (with proper newlines)
                                     await queue.put(safe_token)
                                 except Exception as e:
                                     logger.warning(f"Error processing token, skipping: {str(e)}")
-                                    # Try even more aggressive filtering as a last resort
-                                    try:
-                                        # Only allow basic ASCII printable characters
-                                        super_safe_token = re.sub(r'[^\x20-\x7E]', '', token)
-                                        await queue.put(super_safe_token)
-                                    except:
-                                        # If all else fails, just skip this token
-                                        pass
+                                    # If there's an error, just skip this token
+                                    pass
                             
                             async def on_tool_start(self, serialized, input_dict, **kwargs):
-                                tool_call_id = kwargs.get("run_id", str(uuid.uuid4()))
+                                tool_call_id = str(kwargs.get("run_id", uuid.uuid4()))  # Convert UUID to string
                                 tool_name = serialized.get("name", "unknown_tool") 
                                 tool_description = serialized.get("description", "No description available")
                                 
@@ -622,10 +606,11 @@ async def _run_agent_impl(
                                         "args": json.dumps(input_dict)
                                     }
                                 }
-                                await queue.put(f"__INTERNAL_TOOL_CALL__{json.dumps(tool_call)}__END_INTERNAL__")
+                                # Don't send internal tool calls to user - they're for frontend processing only
+                                # await queue.put(f"__INTERNAL_TOOL_CALL__{json.dumps(tool_call)}__END_INTERNAL__")
                             
                             async def on_tool_end(self, output: str, **kwargs):
-                                tool_call_id = kwargs.get("run_id", str(uuid.uuid4()))
+                                tool_call_id = str(kwargs.get("run_id", uuid.uuid4()))  # Convert UUID to string
                                 tool_name = kwargs.get("name", "unknown_tool")
                                 tool_input = kwargs.get("input", {})
                                 
@@ -646,7 +631,8 @@ async def _run_agent_impl(
                                     }
                                 }
 
-                                await queue.put(f"__INTERNAL_TOOL_RESULT__{json.dumps(tool_result)}__END_INTERNAL__")
+                                # Don't send internal tool results to user - they're for frontend processing only
+                                # await queue.put(f"__INTERNAL_TOOL_RESULT__{json.dumps(tool_result)}__END_INTERNAL__")
                         
                         callbacks = [StreamingCallbackHandler()]
                         
