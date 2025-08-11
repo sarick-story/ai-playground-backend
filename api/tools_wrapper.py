@@ -10,10 +10,10 @@ from mcp import ClientSession, StdioServerParameters  # type: ignore
 from mcp.client.stdio import stdio_client  # type: ignore
 from langchain_mcp_adapters.tools import load_mcp_tools  # type: ignore
 
-from langgraph.prebuilt import interrupt, InjectedStore, InjectedState  # Import interrupt, InjectedStore and InjectedState
+from langgraph.prebuilt import InjectedStore, InjectedState  # Import InjectedStore and InjectedState
 from langgraph.store.base import BaseStore
-from langgraph.types import Command
-from .interrupt_handler import create_simple_confirmation_interrupt, create_transaction_interrupt, FeeInformation, send_standard_interrupt
+from langgraph.types import Command, interrupt
+from .interrupt_handler import create_transaction_interrupt, FeeInformation
 
 
 
@@ -99,37 +99,33 @@ def create_simple_confirmation_wrapper(
             logger.error(f"🚀🚀🚀 WRAPPER START [{execution_id}] Tool: {tool_name}, Args: {kwargs} 🚀🚀🚀")
             print(f"🚀🚀🚀 WRAPPER START [{execution_id}] Tool: {tool_name}, Args: {kwargs} 🚀🚀🚀")
             
-            # Create standardized interrupt message - use simple value for interrupt
-            # LangGraph needs the EXACT SAME interrupt value on resume
-            interrupt_msg = create_simple_confirmation_interrupt(
-                tool_name=tool_name,
-                parameters=kwargs
-            )
+            # Create simple interrupt message as per LangGraph tutorial
+            interrupt_message = f"Trying to call `{tool_name}` with args {kwargs}. Please approve or suggest edits."
             
-            # Send standardized interrupt and get the resume response
+            # Send interrupt and get the response - this follows LangGraph tutorial pattern
             logger.info(f"🚨 [{execution_id}] Calling interrupt for tool {tool_name}")
             
-            # The interrupt() function has two behaviors:
-            # 1. First call: throws GraphInterrupt to pause execution
-            # 2. After resume: returns the resume value
-            resume_response = None
-            try:
-                resume_response = send_standard_interrupt(interrupt_msg)
-                # If we get here, it means we're on the SECOND execution after resume
-                logger.info(f"✅ [{execution_id}] INTERRUPT RETURNED VALUE (after resume): {resume_response}")
-                logger.info(f"✅ [{execution_id}] Type of resume response: {type(resume_response)}")
-                
-            except Exception as interrupt_e:
-                # This is expected on the FIRST call - GraphInterrupt is thrown to pause execution
-                logger.info(f"🔄 [{execution_id}] GraphInterrupt thrown (first execution) - will resume after confirmation")
-                # Re-raise the GraphInterrupt to let LangGraph handle it
-                raise
-                
-            # Check if user confirmed or cancelled
-            logger.info(f"📋 [{execution_id}] Checking resume response: {resume_response}")
-            if not resume_response:
-                logger.info(f"❌ [{execution_id}] User cancelled or no response - returning cancellation")
-                return f"Operation cancelled by user for {tool_name}"
+            # Direct interrupt call as per tutorial - no wrapper function
+            response = interrupt(interrupt_message)
+            
+            # Handle the structured response as per LangGraph tutorial
+            logger.info(f"✅ [{execution_id}] INTERRUPT RETURNED RESPONSE: {response}")
+            logger.info(f"✅ [{execution_id}] Response type: {type(response)}")
+            
+            # Check response type and handle accordingly
+            if isinstance(response, dict) and response.get("type") == "accept":
+                logger.info(f"✅ [{execution_id}] User accepted - proceeding with original args")
+            elif isinstance(response, dict) and response.get("type") == "edit":
+                logger.info(f"✏️ [{execution_id}] User requested edits - updating args")
+                # Update kwargs with edited values if provided
+                if "args" in response and isinstance(response["args"], dict):
+                    kwargs.update(response["args"])
+                    logger.info(f"✏️ [{execution_id}] Updated kwargs: {kwargs}")
+            elif isinstance(response, dict) and response.get("type") == "reject":
+                logger.info(f"❌ [{execution_id}] User rejected - cancelling operation")
+                return f"Operation rejected by user for {tool_name}"
+            else:
+                logger.warning(f"⚠️ [{execution_id}] Unknown response format: {response} - proceeding with original args")
             
             # This point should only be reached AFTER user confirmation and resume
             logger.info(f"🎯 [{execution_id}] POST-INTERRUPT: User confirmed, executing original tool {tool_name}")

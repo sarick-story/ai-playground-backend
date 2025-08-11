@@ -372,14 +372,21 @@ async def resume_interrupted_conversation(
         
         # Resume the graph execution using proper Command pattern with timeout
         # This is the correct way to resume interrupts in LangGraph 2025
-        logger.info(f"🔄 RESUME START: Command(resume={confirmed}) for {conversation_id}")
+        
+        # Create structured resume value as per LangGraph tutorial
+        if confirmed:
+            resume_value = {"type": "accept"}
+        else:
+            resume_value = {"type": "reject"}
+        
+        logger.info(f"🔄 RESUME START: Command(resume={resume_value}) for {conversation_id}")
         
         # Add timeout to prevent hanging - 30 seconds should be enough
-        logger.info(f"🔄 About to call supervisor.ainvoke with Command(resume={confirmed})")
+        logger.info(f"🔄 About to call supervisor.ainvoke with Command(resume={resume_value})")
         
         result = await asyncio.wait_for(
             supervisor.ainvoke(
-                Command(resume=confirmed),  # Use Command with resume parameter
+                Command(resume=resume_value),  # Use structured resume value format
                 config=thread_config
             ),
             timeout=30.0  # 30 second timeout
