@@ -103,11 +103,18 @@ def create_simple_confirmation_wrapper(
                 parameters=parameters_dict
             )
             
-            # Send standardized interrupt
+            # Send standardized interrupt and get the resume response
             logger.info(f"🚨 [{execution_id}] Sending interrupt for tool {tool_name}")
             try:
-                send_standard_interrupt(interrupt_msg)
-                logger.info(f"🚨 [{execution_id}] Interrupt sent successfully for {tool_name}")
+                # The interrupt() function RETURNS the resume value when resumed
+                resume_response = send_standard_interrupt(interrupt_msg)
+                logger.info(f"🚨 [{execution_id}] Interrupt returned resume response: {resume_response}")
+                
+                # Check if user confirmed or cancelled
+                if not resume_response:
+                    logger.info(f"❌ [{execution_id}] User cancelled operation for {tool_name}")
+                    return f"Operation cancelled by user for {tool_name}"
+                    
             except Exception as interrupt_e:
                 logger.error(f"❌ [{execution_id}] Error sending interrupt for {tool_name}: {str(interrupt_e)}")
                 import traceback
@@ -115,7 +122,7 @@ def create_simple_confirmation_wrapper(
                 raise
             
             # This point should only be reached AFTER user confirmation and resume
-            logger.info(f"🎯 [{execution_id}] POST-INTERRUPT: About to execute original tool {tool_name}")
+            logger.info(f"🎯 [{execution_id}] POST-INTERRUPT: User confirmed, executing original tool {tool_name}")
             
             # Execute original tool after confirmation
             try:

@@ -108,11 +108,11 @@ def create_standard_interrupt(
     return interrupt_msg
 
 
-def send_standard_interrupt(interrupt_msg: StandardInterruptMessage) -> None:
-    """Send standardized interrupt to LangGraph."""
+def send_standard_interrupt(interrupt_msg: StandardInterruptMessage):
+    """Send standardized interrupt to LangGraph and return the resume response."""
     
-    # Send the structured interrupt message
-    interrupt(interrupt_msg.to_dict())
+    # Send the structured interrupt message and return the resume value
+    return interrupt(interrupt_msg.to_dict())
 
 
 def create_transaction_interrupt(
