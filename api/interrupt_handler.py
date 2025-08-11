@@ -7,7 +7,7 @@ import uuid
 from typing import Dict, Any, Optional, List
 from enum import Enum
 from dataclasses import dataclass, asdict
-from langgraph.prebuilt import interrupt
+from langgraph.types import interrupt
 
 
 class InterruptType(str, Enum):

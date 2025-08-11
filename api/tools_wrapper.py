@@ -98,18 +98,30 @@ def create_simple_confirmation_wrapper(
             )
             
             # Send standardized interrupt
-            send_standard_interrupt(interrupt_msg)
+            logger.info(f"🚨 Sending interrupt for tool {tool_name} with message: {interrupt_msg}")
+            try:
+                send_standard_interrupt(interrupt_msg)
+                logger.info(f"🚨 Interrupt sent successfully for {tool_name}")
+            except Exception as interrupt_e:
+                logger.error(f"❌ Error sending interrupt for {tool_name}: {str(interrupt_e)}")
+                import traceback
+                logger.error(f"❌ Interrupt traceback: {traceback.format_exc()}")
+                raise
             
             # Execute original tool after confirmation
             # Check if tool has ainvoke (async) or just invoke (sync)
             try:
-                logger.debug(f"Executing tool {tool_name} with kwargs: {kwargs}")
+                logger.info(f"🔧 Executing wrapped tool {tool_name} with kwargs: {kwargs}")
+                logger.info(f"🔧 Original tool type: {type(original_tool)}")
+                logger.info(f"🔧 Original tool callable: {callable(original_tool)}")
+                logger.info(f"🔧 Has ainvoke: {hasattr(original_tool, 'ainvoke')}")
+                logger.info(f"🔧 Has invoke: {hasattr(original_tool, 'invoke')}")
                 
                 if hasattr(original_tool, 'ainvoke'):
-                    logger.debug(f"Using ainvoke for {tool_name}")
+                    logger.info(f"🔧 Using ainvoke for {tool_name}")
                     result = await original_tool.ainvoke(kwargs)
                 elif hasattr(original_tool, 'invoke'):
-                    logger.debug(f"Using invoke for {tool_name}")
+                    logger.info(f"🔧 Using invoke for {tool_name}")
                     # If only invoke is available, call it (MCP tools might be sync)
                     result = original_tool.invoke(kwargs)
                     # If result is awaitable, await it
@@ -117,16 +129,19 @@ def create_simple_confirmation_wrapper(
                         result = await result
                 else:
                     # Fallback to calling as function
-                    logger.debug(f"Using direct call for {tool_name}")
+                    logger.info(f"🔧 Using direct call for {tool_name}")
                     result = await original_tool(**kwargs) if inspect.iscoroutinefunction(original_tool) else original_tool(**kwargs)
                 
-                logger.debug(f"Tool {tool_name} executed successfully")
+                logger.info(f"🔧 Tool {tool_name} executed successfully: {type(result)}")
                 return result
                 
             except Exception as e:
-                logger.error(f"Error executing tool {tool_name}: {str(e)}")
-                logger.error(f"Tool type: {type(original_tool)}")
-                logger.error(f"Tool attributes: {dir(original_tool)}")
+                logger.error(f"❌ Error executing tool {tool_name}: {str(e)}")
+                logger.error(f"❌ Tool type: {type(original_tool)}")
+                logger.error(f"❌ Tool has __call__: {hasattr(original_tool, '__call__')}")
+                logger.error(f"❌ Tool dir: {[attr for attr in dir(original_tool) if not attr.startswith('_')]}")
+                import traceback
+                logger.error(f"❌ Full traceback: {traceback.format_exc()}")
                 raise
         
         # Create new StructuredTool with the wrapped function
