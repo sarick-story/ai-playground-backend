@@ -362,8 +362,8 @@ def wrap_mint_and_register_ip_with_terms(
             gas_estimate="~300,000 gas"
         )
         
-        # Send standardized interrupt
-        send_standard_interrupt(interrupt_msg)
+        # Send standardized interrupt using direct approach
+        response = interrupt(interrupt_msg.to_dict() if hasattr(interrupt_msg, 'to_dict') else str(interrupt_msg))
         
         # After confirmation, prepare final parameters
         final_params = {
@@ -544,8 +544,8 @@ def wrap_mint_license_tokens(
             gas_estimate="~200,000 gas"
         )
         
-        # Send standardized interrupt
-        send_standard_interrupt(interrupt_msg)
+        # Send standardized interrupt using direct approach
+        response = interrupt(interrupt_msg.to_dict() if hasattr(interrupt_msg, 'to_dict') else str(interrupt_msg))
         
         # Prepare final parameters
         final_params = {

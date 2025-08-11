@@ -668,7 +668,7 @@ async def _run_agent_impl(
                                             
                                             # Send interrupt to frontend
                                             interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
-                                            logger.info(f"Sending interrupt to frontend: {interrupt_info.get('interrupt_id', 'unknown')}")
+                                            logger.info(f"Sending interrupt to frontend: {(interrupt_info.get('interrupt_id', 'unknown') if isinstance(interrupt_info, dict) else 'string-interrupt')}")
                                             await queue.put(interrupt_message)
                                             
                                             # Don't send done=True, wait for frontend confirmation
@@ -690,7 +690,7 @@ async def _run_agent_impl(
                                             
                                             # Send interrupt to frontend
                                             interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
-                                            logger.info(f"✅ Sending interrupt to frontend from updates mode: {interrupt_info.get('interrupt_id', 'unknown')}")
+                                            logger.info(f"✅ Sending interrupt to frontend from updates mode: {(interrupt_info.get('interrupt_id', 'unknown') if isinstance(interrupt_info, dict) else 'string-interrupt')}")
                                             await queue.put(interrupt_message)
                                             
                                             # Don't send done=True, wait for frontend confirmation
@@ -711,7 +711,7 @@ async def _run_agent_impl(
                                             interrupt_info = interrupt_data
                                         
                                         interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
-                                        logger.info(f"Sending interrupt to frontend: {interrupt_info.get('interrupt_id', 'unknown')}")
+                                        logger.info(f"Sending interrupt to frontend: {(interrupt_info.get('interrupt_id', 'unknown') if isinstance(interrupt_info, dict) else 'string-interrupt')}")
                                         await queue.put(interrupt_message)
                                         
                                         return {"status": "interrupted", "conversation_id": conversation_id, "interrupt_data": interrupt_info}
