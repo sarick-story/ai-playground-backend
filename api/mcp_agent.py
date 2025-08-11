@@ -192,7 +192,7 @@ async def run_agent(
         raise FileNotFoundError(error_msg)
     
     server_params = StdioServerParameters(
-        command="python",
+        command="python3",
         args=[server_path],
     )
 

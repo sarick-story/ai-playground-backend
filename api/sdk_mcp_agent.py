@@ -710,6 +710,11 @@ async def _run_agent_impl(
                             async def on_chain_error(self, error, **kwargs):
                                 """Handle chain errors, especially interrupts."""
                                 try:
+                                    # Check if this is a LangGraph Command (normal flow control, not an error)
+                                    if hasattr(error, '__class__') and 'Command' in str(error.__class__):
+                                        logger.debug(f"LangGraph Command detected (normal flow control): {error}")
+                                        return  # Commands are normal flow control, not errors
+                                    
                                     # Check if this is an interrupt
                                     if hasattr(error, '__class__') and 'interrupt' in str(error.__class__).lower():
                                         logger.info(f"Interrupt detected: {error}")
@@ -735,7 +740,7 @@ async def _run_agent_impl(
                                             logger.info("Interrupt message sent to frontend")
                                             return
                                     
-                                    # If not an interrupt, handle as regular error
+                                    # If not an interrupt or command, handle as regular error
                                     error_msg = f"\nError: {str(error)}\n"
                                     logger.error(f"Chain error: {error}")
                                     await queue.put(error_msg)
