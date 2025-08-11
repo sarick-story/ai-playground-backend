@@ -710,9 +710,12 @@ async def _run_agent_impl(
                             async def on_chain_error(self, error, **kwargs):
                                 """Handle chain errors, especially interrupts."""
                                 try:
+                                    # Import Command to check instance
+                                    from langgraph.types import Command
+                                    
                                     # Check if this is a LangGraph Command (normal flow control, not an error)
-                                    if hasattr(error, '__class__') and 'Command' in str(error.__class__):
-                                        logger.debug(f"LangGraph Command detected (normal flow control): {error}")
+                                    if isinstance(error, Command) or 'Command' in str(type(error)):
+                                        logger.debug(f"LangGraph Command detected (normal flow control): {type(error).__name__}")
                                         return  # Commands are normal flow control, not errors
                                     
                                     # Check if this is an interrupt

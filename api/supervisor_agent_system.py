@@ -1,11 +1,16 @@
 from langgraph.prebuilt import create_react_agent
 from .tools_wrapper import create_wrapped_tool_collections
+from .env_loader import load_environment_variables, ensure_openai_api_key
 
 from langgraph_supervisor import create_supervisor
 from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from typing import Optional
+
+# Load environment variables when this module is imported
+load_environment_variables()
+ensure_openai_api_key()
 
 
 async def create_all_agents(checkpointer=None, store=None):

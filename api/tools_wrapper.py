@@ -100,18 +100,69 @@ def create_simple_confirmation_wrapper(
         send_standard_interrupt(interrupt_msg)
         
         # Execute after confirmation
-        if is_async:
-            return await original_tool(*args, **kwargs)
+        # For StructuredTool objects, need to handle parameter passing correctly
+        if hasattr(original_tool, 'invoke'):
+            # StructuredTool - use invoke method with proper parameter handling
+            # LangChain may pass args in kwargs, so we need to extract them
+            if 'args' in kwargs and isinstance(kwargs['args'], (list, tuple)):
+                # If args are passed in kwargs, use them as positional arguments
+                actual_args = kwargs['args']
+                remaining_kwargs = {k: v for k, v in kwargs.items() if k != 'args'}
+                tool_input = {}
+                if actual_args:
+                    # For single argument tools, pass the first argument directly
+                    if len(actual_args) == 1:
+                        # Use the original tool's expected parameter name
+                        if hasattr(original_tool, 'args_schema') and original_tool.args_schema:
+                            # Get the first field name from the schema
+                            field_names = list(original_tool.args_schema.model_fields.keys())
+                            if field_names:
+                                tool_input[field_names[0]] = actual_args[0]
+                            else:
+                                tool_input = actual_args[0]
+                        else:
+                            tool_input = actual_args[0]
+                    else:
+                        tool_input = actual_args
+                tool_input.update(remaining_kwargs)
+            else:
+                # Use provided args and kwargs as-is
+                tool_input = {**kwargs}
+                for i, arg in enumerate(args):
+                    tool_input[f'arg_{i}'] = arg
+            
+            if is_async:
+                return await original_tool.ainvoke(tool_input)
+            else:
+                return original_tool.invoke(tool_input)
         else:
-            return original_tool(*args, **kwargs)
+            # Regular function - call directly
+            if is_async:
+                return await original_tool(*args, **kwargs)
+            else:
+                return original_tool(*args, **kwargs)
     
     def sync_wrapped(*args, **kwargs):
         """Sync wrapper with simple interrupt."""
         import asyncio
-        return asyncio.run(async_wrapped(*args, **kwargs))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop, safe to use asyncio.run
+            return asyncio.run(async_wrapped(*args, **kwargs))
+        else:
+            # Already in a loop, create a task
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, async_wrapped(*args, **kwargs))
+                return future.result()
     
     # Choose wrapper based on original tool type
-    wrapped = async_wrapped if is_async else sync_wrapped
+    # For StructuredTool objects, always use async wrapper since they're async by nature
+    if hasattr(original_tool, 'invoke'):
+        wrapped = async_wrapped
+    else:
+        wrapped = async_wrapped if is_async else sync_wrapped
     # Handle both function and StructuredTool objects
     wrapped.__name__ = getattr(original_tool, '__name__', getattr(original_tool, 'name', 'wrapped_tool'))
     wrapped.__doc__ = getattr(original_tool, '__doc__', getattr(original_tool, 'description', ''))
