@@ -1,6 +1,5 @@
 from langgraph.prebuilt import create_react_agent
-from .tools_wrapper import create_wrapped_tool_collections
-from .env_loader import load_environment_variables, ensure_openai_api_key
+from .tools_wrapper import create_wrapped_tool_collections, create_wrapped_tool_collections_from_tools
 
 from langgraph_supervisor import create_supervisor
 from langchain.chat_models import init_chat_model
@@ -8,20 +7,20 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from typing import Optional
 
-# Load environment variables when this module is imported
-load_environment_variables()
-ensure_openai_api_key()
 
-
-async def create_all_agents(checkpointer=None, store=None):
+async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     """Create all agents with properly loaded tools.
     
     Args:
         checkpointer: Optional checkpointer for state persistence
         store: Optional store for cross-thread memory
+        mcp_tools: Optional pre-loaded MCP tools to use instead of loading separately
     """
-    # Load all tool collections asynchronously
-    tool_collections = await create_wrapped_tool_collections()
+    # Load tool collections - either from provided MCP tools or load separately
+    if mcp_tools:
+        tool_collections = await create_wrapped_tool_collections_from_tools(mcp_tools)
+    else:
+        tool_collections = await create_wrapped_tool_collections()
     
     # Create IP Asset Agent
     IP_ASSET_AGENT = create_react_agent(
@@ -196,14 +195,14 @@ async def create_all_agents(checkpointer=None, store=None):
     }
 
 
-async def create_supervisor_system():
+async def create_supervisor_system(mcp_tools=None):
     """Create the complete supervisor system with all agents."""
     # Create checkpointer and store for persistence
     checkpointer = InMemorySaver()
     store = InMemoryStore()
     
     # Create all agents with loaded tools
-    agents = await create_all_agents(checkpointer=checkpointer, store=store)
+    agents = await create_all_agents(checkpointer=checkpointer, store=store, mcp_tools=mcp_tools)
     
     # Create supervisor with all agents
     supervisor = create_supervisor(

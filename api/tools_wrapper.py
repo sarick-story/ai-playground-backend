@@ -588,10 +588,19 @@ async def example_usage():
         "mint_license_wrapped": wrapped_mint_license
     }
 
+async def create_wrapped_tool_collections_from_tools(mcp_tools):
+    """Create tool collections with confirmation wrappers from pre-loaded MCP tools."""
+    # Organize tools by name
+    tools = {tool.name: tool for tool in mcp_tools}
+    return _create_tool_collections(tools)
+
 async def create_wrapped_tool_collections():
     """Create tool collections with confirmation wrappers."""
     tools = await get_tools_by_name()
-    
+    return _create_tool_collections(tools)
+
+def _create_tool_collections(tools):
+    """Internal function to create tool collections from tools dictionary."""
     # Helper function to safely wrap tools
     def safe_wrap(tool_name, description=None):
         tool = tools.get(tool_name)

@@ -665,16 +665,19 @@ async def _run_agent_impl(
             async with stdio_client(server_params) as (read, write):
                 logger.info("Stdio client initialized, creating session")
                 async with ClientSession(read, write) as session:
-                    # Skip MCP tool loading since supervisor system handles this internally
-                    logger.info("Using supervisor system - MCP tools loaded internally")
+                    # Load MCP tools to pass to supervisor system
+                    logger.info("Loading MCP tools for supervisor system")
+                    await session.initialize()
+                    tools = await load_mcp_tools(session)
+                    logger.info(f"Loaded {len(tools)} MCP tools")
                     
                     # Log wallet address if provided
                     if wallet_address:
                         logger.info(f"Using wallet address: {wallet_address}")
 
-                    # Use supervisor system instead of single agent
+                    # Use supervisor system with active MCP tools
                     logger.info("Using supervisor system with specialized agents")
-                    supervisor, supervisor_agents = await create_supervisor_system()
+                    supervisor, supervisor_agents = await create_supervisor_system(mcp_tools=tools)
                     
                     # Prepare messages for supervisor
                     messages = message_history or [{"role": "user", "content": user_message}]
