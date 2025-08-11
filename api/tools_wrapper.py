@@ -89,6 +89,12 @@ def create_simple_confirmation_wrapper(
             # Get tool name
             tool_name = getattr(original_tool, 'name', 'tool')
             
+            # Add unique execution ID to track re-execution
+            import uuid
+            execution_id = str(uuid.uuid4())[:8]
+            
+            logger.info(f"🚀 WRAPPER START [{execution_id}] Tool: {tool_name}, Args: {kwargs}")
+            
             # Create standardized interrupt message
             parameters_dict = {"kwargs": kwargs}
             
@@ -98,50 +104,49 @@ def create_simple_confirmation_wrapper(
             )
             
             # Send standardized interrupt
-            logger.info(f"🚨 Sending interrupt for tool {tool_name} with message: {interrupt_msg}")
+            logger.info(f"🚨 [{execution_id}] Sending interrupt for tool {tool_name}")
             try:
                 send_standard_interrupt(interrupt_msg)
-                logger.info(f"🚨 Interrupt sent successfully for {tool_name}")
+                logger.info(f"🚨 [{execution_id}] Interrupt sent successfully for {tool_name}")
             except Exception as interrupt_e:
-                logger.error(f"❌ Error sending interrupt for {tool_name}: {str(interrupt_e)}")
+                logger.error(f"❌ [{execution_id}] Error sending interrupt for {tool_name}: {str(interrupt_e)}")
                 import traceback
-                logger.error(f"❌ Interrupt traceback: {traceback.format_exc()}")
+                logger.error(f"❌ [{execution_id}] Interrupt traceback: {traceback.format_exc()}")
                 raise
             
+            # This point should only be reached AFTER user confirmation and resume
+            logger.info(f"🎯 [{execution_id}] POST-INTERRUPT: About to execute original tool {tool_name}")
+            
             # Execute original tool after confirmation
-            # Check if tool has ainvoke (async) or just invoke (sync)
             try:
-                logger.info(f"🔧 Executing wrapped tool {tool_name} with kwargs: {kwargs}")
-                logger.info(f"🔧 Original tool type: {type(original_tool)}")
-                logger.info(f"🔧 Original tool callable: {callable(original_tool)}")
-                logger.info(f"🔧 Has ainvoke: {hasattr(original_tool, 'ainvoke')}")
-                logger.info(f"🔧 Has invoke: {hasattr(original_tool, 'invoke')}")
+                logger.info(f"🔧 [{execution_id}] Executing original tool {tool_name} with kwargs: {kwargs}")
+                logger.info(f"🔧 [{execution_id}] Original tool type: {type(original_tool)}")
+                logger.info(f"🔧 [{execution_id}] Has ainvoke: {hasattr(original_tool, 'ainvoke')}")
+                logger.info(f"🔧 [{execution_id}] Has invoke: {hasattr(original_tool, 'invoke')}")
                 
                 if hasattr(original_tool, 'ainvoke'):
-                    logger.info(f"🔧 Using ainvoke for {tool_name}")
+                    logger.info(f"🔧 [{execution_id}] Using ainvoke for {tool_name}")
                     result = await original_tool.ainvoke(kwargs)
                 elif hasattr(original_tool, 'invoke'):
-                    logger.info(f"🔧 Using invoke for {tool_name}")
-                    # If only invoke is available, call it (MCP tools might be sync)
+                    logger.info(f"🔧 [{execution_id}] Using invoke for {tool_name}")
                     result = original_tool.invoke(kwargs)
-                    # If result is awaitable, await it
                     if inspect.isawaitable(result):
                         result = await result
                 else:
-                    # Fallback to calling as function
-                    logger.info(f"🔧 Using direct call for {tool_name}")
+                    logger.info(f"🔧 [{execution_id}] Using direct call for {tool_name}")
                     result = await original_tool(**kwargs) if inspect.iscoroutinefunction(original_tool) else original_tool(**kwargs)
                 
-                logger.info(f"🔧 Tool {tool_name} executed successfully: {type(result)}")
+                logger.info(f"✅ [{execution_id}] Tool {tool_name} executed successfully!")
+                logger.info(f"✅ [{execution_id}] Result type: {type(result)}")
+                logger.info(f"✅ [{execution_id}] Result content: {str(result)[:200]}...")
+                
                 return result
                 
             except Exception as e:
-                logger.error(f"❌ Error executing tool {tool_name}: {str(e)}")
-                logger.error(f"❌ Tool type: {type(original_tool)}")
-                logger.error(f"❌ Tool has __call__: {hasattr(original_tool, '__call__')}")
-                logger.error(f"❌ Tool dir: {[attr for attr in dir(original_tool) if not attr.startswith('_')]}")
+                logger.error(f"❌ [{execution_id}] Error executing tool {tool_name}: {str(e)}")
+                logger.error(f"❌ [{execution_id}] Tool type: {type(original_tool)}")
                 import traceback
-                logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                logger.error(f"❌ [{execution_id}] Full traceback: {traceback.format_exc()}")
                 raise
         
         # Create new StructuredTool with the wrapped function

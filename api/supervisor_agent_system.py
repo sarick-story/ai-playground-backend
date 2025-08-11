@@ -28,7 +28,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["ip_asset_tool"],
         checkpointer=checkpointer,
         store=store,
-        version="v2",  # Prevent tool re-execution after interrupt resume
+        # version="v2" removed - doesn't solve the issue
         prompt=(
             "You are an IP Asset Agent specialized in Story Protocol IP management.\n\n"
             "INSTRUCTIONS:\n"
@@ -48,7 +48,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["ip_account_tool"],
         checkpointer=checkpointer,
         store=store,
-        version="v2",  # Prevent tool re-execution after interrupt resume
+        # version="v2" removed - doesn't solve the issue
         prompt=(
             "You are an IP Account Agent for Story Protocol account management.\n\n"
             "INSTRUCTIONS:\n"
@@ -67,7 +67,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["license_tool"],
         checkpointer=checkpointer,
         store=store,
-        version="v2",  # Prevent tool re-execution after interrupt resume
+        # version="v2" removed - doesn't solve the issue
         prompt=(
             "You are a License Agent for Story Protocol licensing operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -87,7 +87,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["nft_client_tool"],
         checkpointer=checkpointer,
         store=store,
-        version="v2",  # Prevent tool re-execution after interrupt resume
+        # version="v2" removed - doesn't solve the issue
         prompt=(
             "You are an NFT Client Agent for Story Protocol NFT collection management.\n\n"
             "INSTRUCTIONS:\n"
@@ -106,7 +106,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["dispute_tool"],
         checkpointer=checkpointer,
         store=store,
-        version="v2",  # Prevent tool re-execution after interrupt resume
+        # version="v2" removed - doesn't solve the issue
         prompt=(
             "You are a Dispute Agent for Story Protocol dispute management.\n\n"
             "INSTRUCTIONS:\n"
@@ -125,7 +125,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["group_tool"],
         checkpointer=checkpointer,
         store=store,
-        version="v2",  # Prevent tool re-execution after interrupt resume
+        # version="v2" removed - doesn't solve the issue
         prompt=(
             "You are a Group Agent for Story Protocol group operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -142,7 +142,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["permission_tool"],
         checkpointer=checkpointer,
         store=store,
-        version="v2",  # Prevent tool re-execution after interrupt resume
+        # version="v2" removed - doesn't solve the issue
         prompt=(
             "You are a Permission Agent for Story Protocol permission management.\n\n"
             "INSTRUCTIONS:\n"
@@ -159,7 +159,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["royalty_tool"],
         checkpointer=checkpointer,
         store=store,
-        version="v2",  # Prevent tool re-execution after interrupt resume
+        # version="v2" removed - doesn't solve the issue
         prompt=(
             "You are a Royalty Agent for Story Protocol royalty management.\n\n"
             "INSTRUCTIONS:\n"
@@ -178,7 +178,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["wip_tool"],
         checkpointer=checkpointer,
         store=store,
-        version="v2",  # Prevent tool re-execution after interrupt resume
+        # version="v2" removed - doesn't solve the issue
         prompt=(
             "You are a WIP Token Agent for Story Protocol wrapped IP token operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -372,9 +372,11 @@ async def resume_interrupted_conversation(
         
         # Resume the graph execution using proper Command pattern with timeout
         # This is the correct way to resume interrupts in LangGraph 2025
-        logger.info(f"Starting resume with Command(resume={confirmed})")
+        logger.info(f"🔄 RESUME START: Command(resume={confirmed}) for {conversation_id}")
         
         # Add timeout to prevent hanging - 30 seconds should be enough
+        logger.info(f"🔄 About to call supervisor.ainvoke with Command(resume={confirmed})")
+        
         result = await asyncio.wait_for(
             supervisor.ainvoke(
                 Command(resume=confirmed),  # Use Command with resume parameter
@@ -383,7 +385,18 @@ async def resume_interrupted_conversation(
             timeout=30.0  # 30 second timeout
         )
         
-        logger.info(f"Resume completed for conversation {conversation_id}")
+        logger.info(f"🔄 RESUME COMPLETED for {conversation_id}")
+        logger.info(f"🔄 Raw result type: {type(result)}")
+        logger.info(f"🔄 Raw result keys: {result.keys() if isinstance(result, dict) else 'N/A'}")
+        
+        # Log the messages if they exist
+        if isinstance(result, dict) and 'messages' in result:
+            messages = result['messages']
+            logger.info(f"🔄 Found {len(messages)} messages in result")
+            for i, msg in enumerate(messages[-3:]):  # Log last 3 messages
+                logger.info(f"🔄 Message {i}: {type(msg)} - {str(msg)[:100]}...")
+        else:
+            logger.info(f"🔄 No messages found in result: {str(result)[:200]}...")
         
         # Serialize the result to handle AIMessage and other LangChain objects
         serialized_result = _serialize_langchain_objects(result)
