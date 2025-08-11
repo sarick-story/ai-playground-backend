@@ -28,7 +28,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["ip_asset_tool"],
         checkpointer=checkpointer,
         store=store,
-        # version="v2" removed - doesn't solve the issue
+        version="v2",  # Required for proper interrupt/resume in tools
         prompt=(
             "You are an IP Asset Agent specialized in Story Protocol IP management.\n\n"
             "INSTRUCTIONS:\n"
@@ -48,7 +48,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["ip_account_tool"],
         checkpointer=checkpointer,
         store=store,
-        # version="v2" removed - doesn't solve the issue
+        version="v2",  # Required for proper interrupt/resume in tools
         prompt=(
             "You are an IP Account Agent for Story Protocol account management.\n\n"
             "INSTRUCTIONS:\n"
@@ -67,7 +67,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["license_tool"],
         checkpointer=checkpointer,
         store=store,
-        # version="v2" removed - doesn't solve the issue
+        version="v2",  # Required for proper interrupt/resume in tools
         prompt=(
             "You are a License Agent for Story Protocol licensing operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -87,7 +87,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["nft_client_tool"],
         checkpointer=checkpointer,
         store=store,
-        # version="v2" removed - doesn't solve the issue
+        version="v2",  # Required for proper interrupt/resume in tools
         prompt=(
             "You are an NFT Client Agent for Story Protocol NFT collection management.\n\n"
             "INSTRUCTIONS:\n"
@@ -106,7 +106,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["dispute_tool"],
         checkpointer=checkpointer,
         store=store,
-        # version="v2" removed - doesn't solve the issue
+        version="v2",  # Required for proper interrupt/resume in tools
         prompt=(
             "You are a Dispute Agent for Story Protocol dispute management.\n\n"
             "INSTRUCTIONS:\n"
@@ -125,7 +125,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["group_tool"],
         checkpointer=checkpointer,
         store=store,
-        # version="v2" removed - doesn't solve the issue
+        version="v2",  # Required for proper interrupt/resume in tools
         prompt=(
             "You are a Group Agent for Story Protocol group operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -142,7 +142,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["permission_tool"],
         checkpointer=checkpointer,
         store=store,
-        # version="v2" removed - doesn't solve the issue
+        version="v2",  # Required for proper interrupt/resume in tools
         prompt=(
             "You are a Permission Agent for Story Protocol permission management.\n\n"
             "INSTRUCTIONS:\n"
@@ -159,7 +159,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["royalty_tool"],
         checkpointer=checkpointer,
         store=store,
-        # version="v2" removed - doesn't solve the issue
+        version="v2",  # Required for proper interrupt/resume in tools
         prompt=(
             "You are a Royalty Agent for Story Protocol royalty management.\n\n"
             "INSTRUCTIONS:\n"
@@ -178,7 +178,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["wip_tool"],
         checkpointer=checkpointer,
         store=store,
-        # version="v2" removed - doesn't solve the issue
+        version="v2",  # Required for proper interrupt/resume in tools
         prompt=(
             "You are a WIP Token Agent for Story Protocol wrapped IP token operations.\n\n"
             "INSTRUCTIONS:\n"
