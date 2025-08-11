@@ -3,10 +3,17 @@ from tools_wrapper import create_wrapped_tool_collections
 
 from langgraph_supervisor import create_supervisor
 from langchain.chat_models import init_chat_model
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
 
 
-async def create_all_agents():
-    """Create all agents with properly loaded tools."""
+async def create_all_agents(checkpointer=None, store=None):
+    """Create all agents with properly loaded tools.
+    
+    Args:
+        checkpointer: Optional checkpointer for state persistence
+        store: Optional store for cross-thread memory
+    """
     # Load all tool collections asynchronously
     tool_collections = await create_wrapped_tool_collections()
     
@@ -14,6 +21,8 @@ async def create_all_agents():
     IP_ASSET_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["ip_asset_tool"],
+        checkpointer=checkpointer,
+        store=store,
         prompt=(
             "You are an IP Asset Agent specialized in Story Protocol IP management.\n\n"
             "INSTRUCTIONS:\n"
@@ -31,6 +40,8 @@ async def create_all_agents():
     IP_ACCOUNT_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["ip_account_tool"],
+        checkpointer=checkpointer,
+        store=store,
         prompt=(
             "You are an IP Account Agent for Story Protocol account management.\n\n"
             "INSTRUCTIONS:\n"
@@ -47,6 +58,8 @@ async def create_all_agents():
     IP_LICENSE_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["license_tool"],
+        checkpointer=checkpointer,
+        store=store,
         prompt=(
             "You are a License Agent for Story Protocol licensing operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -64,6 +77,8 @@ async def create_all_agents():
     NFT_CLIENT_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["nft_client_tool"],
+        checkpointer=checkpointer,
+        store=store,
         prompt=(
             "You are an NFT Client Agent for Story Protocol NFT collection management.\n\n"
             "INSTRUCTIONS:\n"
@@ -80,6 +95,8 @@ async def create_all_agents():
     DISPUTE_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["dispute_tool"],
+        checkpointer=checkpointer,
+        store=store,
         prompt=(
             "You are a Dispute Agent for Story Protocol dispute management.\n\n"
             "INSTRUCTIONS:\n"
@@ -96,6 +113,8 @@ async def create_all_agents():
     GROUP_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["group_tool"],
+        checkpointer=checkpointer,
+        store=store,
         prompt=(
             "You are a Group Agent for Story Protocol group operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -110,6 +129,8 @@ async def create_all_agents():
     PERMISSION_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["permission_tool"],
+        checkpointer=checkpointer,
+        store=store,
         prompt=(
             "You are a Permission Agent for Story Protocol permission management.\n\n"
             "INSTRUCTIONS:\n"
@@ -124,6 +145,8 @@ async def create_all_agents():
     ROYALTY_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["royalty_tool"],
+        checkpointer=checkpointer,
+        store=store,
         prompt=(
             "You are a Royalty Agent for Story Protocol royalty management.\n\n"
             "INSTRUCTIONS:\n"
@@ -140,6 +163,8 @@ async def create_all_agents():
     WIP_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["wip_tool"],
+        checkpointer=checkpointer,
+        store=store,
         prompt=(
             "You are a WIP Token Agent for Story Protocol wrapped IP token operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -167,8 +192,12 @@ async def create_all_agents():
 
 async def create_supervisor_system():
     """Create the complete supervisor system with all agents."""
+    # Create checkpointer and store for persistence
+    checkpointer = InMemorySaver()
+    store = InMemoryStore()
+    
     # Create all agents with loaded tools
-    agents = await create_all_agents()
+    agents = await create_all_agents(checkpointer=checkpointer, store=store)
     
     # Create supervisor with all agents
     supervisor = create_supervisor(
@@ -191,11 +220,12 @@ async def create_supervisor_system():
             "- Assign work to ONE agent at a time, do not call agents in parallel\n"
             "- For complex workflows, coordinate between agents sequentially\n"
             "- Do not perform any Story Protocol operations yourself\n"
-            "- Always explain which agent you're routing the task to and why"
+            "- If one agent is not able to handle the request, hand off to the next agent\n"
+            "- The user is not aware of the different specialized agent assistants, so do not mention them\n"
         ),
         add_handoff_back_messages=True,
         output_mode="full_history",
-    ).compile()
+    ).compile(checkpointer=checkpointer, store=store)
     
     return supervisor, agents
 

@@ -36,7 +36,7 @@ async def load_sdk_mcp_tools() -> List:  # returns a list of tool callables comp
             raise FileNotFoundError("Could not find story-sdk-mcp server.py. Set SDK_MCP_SERVER_PATH to override.")
 
     server_params = StdioServerParameters(
-        command="python",
+        command="python3",
         args=[server_path],
     )
 
@@ -81,16 +81,19 @@ def create_simple_confirmation_wrapper(
     async def async_wrapped(*args, **kwargs):
         """Async wrapper with simple interrupt."""
         
+        # Get tool name for both functions and StructuredTool objects
+        tool_name = getattr(original_tool, '__name__', getattr(original_tool, 'name', 'tool'))
+        
         # Create interrupt message
         interrupt_message = {
             "type": "tool_confirmation",
-            "tool_name": original_tool.__name__,
-            "description": tool_description or f"Execute {original_tool.__name__}",
+            "tool_name": tool_name,
+            "description": tool_description or f"Execute {tool_name}",
             "parameters": {
                 "args": list(args) if args else [],
                 "kwargs": dict(kwargs) if kwargs else {}
             },
-            "message": f"Please confirm execution of {original_tool.__name__}"
+            "message": f"Please confirm execution of {tool_name}"
         }
         
         # Interrupt for confirmation
@@ -109,8 +112,9 @@ def create_simple_confirmation_wrapper(
     
     # Choose wrapper based on original tool type
     wrapped = async_wrapped if is_async else sync_wrapped
-    wrapped.__name__ = original_tool.__name__
-    wrapped.__doc__ = original_tool.__doc__
+    # Handle both function and StructuredTool objects
+    wrapped.__name__ = getattr(original_tool, '__name__', getattr(original_tool, 'name', 'wrapped_tool'))
+    wrapped.__doc__ = getattr(original_tool, '__doc__', getattr(original_tool, 'description', ''))
     
     return wrapped
 
