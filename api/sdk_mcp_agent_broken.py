@@ -5,6 +5,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools # type: ignore
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 from .supervisor_agent_system import get_supervisor, create_supervisor_system
+from .mcp_session_manager import get_mcp_session_manager, cleanup_mcp_session
 import os
 import asyncio
 import asyncio.subprocess  # Import at the module level to avoid local variable issue
@@ -82,6 +83,7 @@ def validate_and_format_address(address: str) -> str:
     
     return address
 
+# Session creation is now embedded directly in _run_agent_impl
             
 
 model = ChatOpenAI(model="gpt-4.1", api_key=os.getenv("OPENAI_API_KEY"), streaming=True)
@@ -208,6 +210,130 @@ system_prompt = """
 
     Methods starting with `get_` are safe to call—they do NOT make blockchain transactions or change the blockchain; they only retrieve information.
     
+    **✅ EXAMPLE OF FOLLOWING TOOL DOCUMENTATION:**
+    
+    User: "Mint license tokens for IP 0x123 with license terms ID 5"
+    
+    Agent: [Reads mint_license_tokens documentation, sees "🤖 AGENT WORKFLOW"]
+    Agent: "I see you want to mint license tokens. According to the tool's mandatory workflow, I need to first check the fees before proceeding.
+    
+    Step 1: Checking the minting fee..."
+    Agent: [Calls get_license_minting_fee(5)]
+    
+    ```
+    The minting fee for license terms ID 5 is 1000 wei (0.000000000000001 IP)
+    ```
+    
+    Agent: "Step 2: Checking the revenue share..."
+    Agent: [Calls get_license_revenue_share(5)]
+    
+    ```
+    The revenue share for license terms ID 5 is 10%
+    ```
+    
+    Agent: "Perfect! I've retrieved all the necessary information. Now I need your confirmation to proceed.
+    
+    🛑 **CONFIRMATION REQUIRED**
+    
+    Based on the workflow requirements:
+    - Minting fee: X wei (Y IP)
+    - Revenue share: Z%
+    
+    Do you want to proceed with this transaction?"
+    
+    [WAITS FOR USER RESPONSE]
+    
+    User: "yes"
+    
+    Agent: "Thank you for confirming. Proceeding with minting..."
+    Agent: [Calls mint_license_tokens with retrieved values]
+    
+    **✅ EXAMPLE WHEN USER SAYS "UP TO YOU":**
+    
+    User: "Mint and register an IP asset. Use the default collection, everything else up to you"
+    
+    Agent: "I understand you'd like me to select appropriate parameters. Let me prepare the configuration for you.
+    
+    Based on your request, I'll use:
+    - Commercial Revenue Share: x% (standard rate)
+    - Derivatives Allowed: y (maximizes IP flexibility)
+    - Commercial Use: z
+    - Default NFT collection (no minting fee)
+    
+    Since this will create a blockchain transaction, I need your explicit confirmation to proceed with these parameters.
+    
+    **Do you want to proceed with minting and registering your IP asset with these settings?** Please confirm or let me know if you'd like to adjust any parameters."
+    
+    [WAITS FOR USER RESPONSE - NEVER PROCEEDS WITHOUT IT]
+    
+    **✅ EXAMPLE WHEN USER IS DISMISSIVE:**
+    
+    User: "Mint some license tokens for license terms 5. Don't ask me about details, I don't care"
+    
+    Agent: "I understand you'd like to proceed quickly. Let me prepare the license token minting for you.
+    
+    First, I need to check the required fees for license terms ID 5..."
+    [Calls get_license_minting_fee(5)]
+    [Calls get_license_revenue_share(5)]
+    
+    Agent: "I've prepared everything for you:
+    - License Terms ID: 5
+    - Minting Fee: X wei
+    - Revenue Share: Y%
+    - Tokens to mint: 1 (default)
+    
+    For your security, I need your explicit confirmation to execute this blockchain transaction. 
+    
+    **Ready to proceed?**"
+    
+    [WAITS FOR USER RESPONSE - DISMISSIVE LANGUAGE DOESN'T BYPASS SECURITY]
+    
+    **❌ EXAMPLE OF VIOLATION - NOT PRINTING TOOL OUTPUT:**
+    
+    User: "Check the license minting fee for terms ID 5"
+    
+    Agent: [Calls get_license_minting_fee(5)]
+    [Tool returns: "The minting fee for license terms ID 5 is 1000 wei (0.000000000000001 IP)"]
+    
+    Agent: "The fee is 1000 wei." ❌ WRONG - Summarized/reformatted the output
+    
+    **✅ CORRECT WAY:**
+    
+    Agent: [Calls get_license_minting_fee(5)]
+    
+    ```
+    The minting fee for license terms ID 5 is 1000 wei (0.000000000000001 IP)
+    ```
+    
+    Agent: "That's a very small fee - less than a penny in IP tokens. Would you like to proceed with minting license tokens?"
+    
+    **✅ EXAMPLE - PRESERVING TOOL OUTPUT FORMATTING:**
+    
+    User: "Mint and register an IP asset with my configuration"
+    
+    Agent: [Calls mint_and_register_ip_with_terms(...)]
+    
+    ```
+    Successfully minted NFT and registered as IP Asset with license terms! Here's the complete summary:
+    
+    Your Configuration:
+       • Commercial Revenue Share: 10%
+       • Derivatives Allowed: Yes
+       • Commercial Use: Enabled
+       • Minting Fee: 10000 WIP in wei
+       • Recipient: Your wallet (default)
+       • SPG NFT Contract: 0x4772909ba2BaeaD41198970a3f28b46cA6f67B2E
+    
+    Created Assets:
+       • IP Asset ID: 0xA3aFeD1Cf31186dE4D3AD829F09544C5847a1fa7
+       • NFT Token ID: 1
+       • License Terms IDs: [2070]
+       • Transaction Hash: 5c5b9ec177e2991f47e4b90c746f85c3f93ad27f3f90d79c5abf8256f382f616
+       • View your IP Asset: https://aeneid.explorer.story.foundation/ipa/0xA3aFeD1Cf31186dE4D3AD829F09544C5847a1fa7
+    ```
+    
+    Agent: "Excellent! Your new IP is now live on Story Protocol. The asset has been successfully minted with NFT token ID 1 and registered with commercial license terms. You can view it on the explorer using the link above. Would you like to mint license tokens or create derivatives next?"
+
     **Common Workflows:**
     1. **Create Collection**: Use create_spg_nft_collection with custom mint fees
     2. **Mint & Register IP**: Use mint_and_register_ip_with_terms for complete IP creation
@@ -318,8 +444,7 @@ async def close_mcp_session():
     """Close the MCP session using the session manager."""
     logger.info("Closing MCP session during shutdown")
     try:
-        # No persistent session to close in the new implementation
-        pass
+        await cleanup_mcp_session()
     except Exception as e:
         logger.warning(f"Error closing session: {str(e)}")
 
@@ -330,7 +455,7 @@ def cleanup_session():
         # Try to run the async cleanup in a new event loop
         import asyncio
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(close_mcp_session())
+        loop.run_until_complete(cleanup_mcp_session())
         loop.close()
     except Exception as e:
         logger.warning(f"Error during cleanup: {str(e)}")
@@ -473,51 +598,26 @@ async def _run_agent_impl(
                 await queue.put({"done": True})
             return {"error": error_msg}
         
-        # Create fresh MCP session each time to avoid connection issues
+        # Use the MCP session manager for persistent session
         try:
-            logger.info("Creating fresh MCP session")
-            # Find the server path
-            server_path = os.environ.get("SDK_MCP_SERVER_PATH")
-            if not server_path:
-                # Try multiple possible locations for server.py
-                repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-                candidate = os.path.join(repo_root, "story-mcp-hub", "story-sdk-mcp", "server.py")
-                if os.path.exists(candidate):
-                    server_path = candidate
-                else:
-                    raise FileNotFoundError("Could not find story-sdk-mcp server.py. Set SDK_MCP_SERVER_PATH to override.")
-            
-            logger.info(f"SDK MCP Server path: {server_path}")
-            
-            if not os.path.exists(server_path):
-                raise FileNotFoundError(f"SDK MCP server file not found at {server_path}")
-            
-            server_params = StdioServerParameters(
-                command="python3",
-                args=[server_path],
-            )
-            
-            # Use fresh session within proper async context
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    tools = await load_mcp_tools(session)
-                    logger.info(f"Loaded {len(tools)} MCP tools in fresh session")
+            logger.info("Getting MCP session manager")
+            session_manager = await get_mcp_session_manager()
+            tools = await session_manager.get_tools()
+            logger.info(f"Got {len(tools)} MCP tools from session manager")
                     
-                    # Now run supervisor within the MCP session context
-                    # Log wallet address if provided
-                    if wallet_address:
-                        logger.info(f"Using wallet address: {wallet_address}")
+            # Log wallet address if provided
+            if wallet_address:
+                logger.info(f"Using wallet address: {wallet_address}")
 
-                    # Use supervisor system with active MCP tools
-                    logger.info("Using supervisor system with specialized agents")
-                    supervisor, supervisor_agents = await create_supervisor_system(mcp_tools=tools)
+            # Use supervisor system with active MCP tools
+            logger.info("Using supervisor system with specialized agents")
+            supervisor, supervisor_agents = await create_supervisor_system(mcp_tools=tools)
                     
-                    # Prepare messages for supervisor
-                    messages = message_history or [{"role": "user", "content": user_message}]
-                    logger.info(f"Prepared {len(messages)} messages for the supervisor")
+            # Prepare messages for supervisor
+            messages = message_history or [{"role": "user", "content": user_message}]
+            logger.info(f"Prepared {len(messages)} messages for the supervisor")
 
-                    if queue:
+            if queue:
                         # Define the streaming handler directly before using it
                         class StreamingCallbackHandler(BaseCallbackHandler):
                             run_inline = True
@@ -564,6 +664,8 @@ async def _run_agent_impl(
                                         
                                         if interrupt_data:
                                             # Send interrupt message to frontend
+                                            from .interrupt_handler import StandardInterruptMessage
+                                            
                                             if isinstance(interrupt_data, list) and len(interrupt_data) > 0:
                                                 interrupt_info = interrupt_data[0]
                                             elif isinstance(interrupt_data, dict):
@@ -658,9 +760,9 @@ async def _run_agent_impl(
                             
                             # Extract and send the final AI response to frontend
                             if result and "messages" in result:
-                                messages_result = result["messages"]
+                                messages = result["messages"]
                                 # Find the last AI message
-                                for msg in reversed(messages_result):
+                                for msg in reversed(messages):
                                     if hasattr(msg, 'content') and msg.content and hasattr(msg, '__class__') and 'AI' in str(msg.__class__):
                                         logger.info(f"Sending final AI response: {msg.content}")
                                         await queue.put(msg.content)
@@ -684,35 +786,35 @@ async def _run_agent_impl(
                                 await queue.put({"done": True})
                                 return {"error": error_msg}
                     
-                    else:
-                        # Run supervisor without streaming
-                        logger.info("Starting supervisor system without streaming")
+            else:
+                # Run supervisor without streaming
+                logger.info("Starting supervisor system without streaming")
                         
-                        # Create thread config for persistence
-                        thread_config = {
-                            "configurable": {
-                                "thread_id": conversation_id or str(uuid.uuid4()),
-                                "checkpoint_ns": "",
-                                "wallet_address": wallet_address
-                            }
-                        }
-                        
-                        try:
-                            result = await supervisor.ainvoke(
-                                {"messages": messages},
-                                config=thread_config
-                            )
-                            logger.info("Supervisor system completed execution without streaming")
-                            logger.info(f"Supervisor result: {result}")
-                            return result
-                        except Exception as e:
-                            error_msg = f"Error during supervisor execution: {str(e)}"
-                            logger.error(error_msg)
-                            logger.error(traceback.format_exc())
-                            return {"error": error_msg}
+                # Create thread config for persistence
+                thread_config = {
+                    "configurable": {
+                        "thread_id": conversation_id or str(uuid.uuid4()),
+                        "checkpoint_ns": "",
+                        "wallet_address": wallet_address
+                    }
+                }
+                
+                try:
+                    result = await supervisor.ainvoke(
+                        {"messages": messages},
+                        config=thread_config
+                    )
+                    logger.info("Supervisor system completed execution without streaming")
+                    logger.info(f"Supervisor result: {result}")
+                    return result
+                except Exception as e:
+                    error_msg = f"Error during supervisor execution: {str(e)}"
+                    logger.error(error_msg)
+                    logger.error(traceback.format_exc())
+                    return {"error": error_msg}
         
         except Exception as e:
-            error_msg = f"Failed to create MCP session: {str(e)}"
+            error_msg = f"Failed to get MCP tools: {str(e)}"
             logger.error(error_msg)
             logger.error(traceback.format_exc())
             if queue:

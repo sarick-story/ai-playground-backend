@@ -1,0 +1,10 @@
+{
+  "messages": [
+    {
+      "role": "user", 
+      "content": "Hello! Can you help me test the system?"
+    }
+  ],
+  "mcp_type": "sdk",
+  "wallet_address": "0x1234567890abcdef1234567890abcdef12345678"
+}
