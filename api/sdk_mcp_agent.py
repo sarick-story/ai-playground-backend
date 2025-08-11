@@ -817,6 +817,17 @@ async def _run_agent_impl(
                             )
                             logger.info("Supervisor system completed execution with streaming")
                             logger.info(f"Supervisor result: {result}")
+                            
+                            # Extract and send the final AI response to frontend
+                            if result and "messages" in result:
+                                messages = result["messages"]
+                                # Find the last AI message
+                                for msg in reversed(messages):
+                                    if hasattr(msg, 'content') and msg.content and hasattr(msg, '__class__') and 'AI' in str(msg.__class__):
+                                        logger.info(f"Sending final AI response: {msg.content}")
+                                        await queue.put(msg.content)
+                                        break
+                            
                             await queue.put({"done": True})
                             return result
                         except Exception as e:
