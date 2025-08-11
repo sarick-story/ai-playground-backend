@@ -263,6 +263,33 @@ async def get_agents():
 # Track interrupted conversations
 _interrupted_conversations = {}
 
+def _serialize_langchain_objects(obj):
+    """Recursively serialize LangChain objects (AIMessage, HumanMessage, etc) to JSON-serializable format."""
+    from langchain_core.messages import BaseMessage
+    
+    if isinstance(obj, BaseMessage):
+        return {
+            "type": obj.__class__.__name__,
+            "content": obj.content,
+            "additional_kwargs": getattr(obj, 'additional_kwargs', {}),
+            "response_metadata": getattr(obj, 'response_metadata', {}),
+            "tool_calls": getattr(obj, 'tool_calls', []),
+            "usage_metadata": getattr(obj, 'usage_metadata', {}),
+        }
+    elif isinstance(obj, dict):
+        return {key: _serialize_langchain_objects(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [_serialize_langchain_objects(item) for item in obj]
+    elif hasattr(obj, '__dict__'):
+        # For other complex objects, try to serialize their dict representation
+        try:
+            return _serialize_langchain_objects(obj.__dict__)
+        except:
+            return str(obj)
+    else:
+        return obj
+
+
 async def resume_interrupted_conversation(
     conversation_id: str,
     interrupt_id: str,
@@ -298,12 +325,15 @@ async def resume_interrupted_conversation(
             config=thread_config
         )
         
+        # Serialize the result to handle AIMessage and other LangChain objects
+        serialized_result = _serialize_langchain_objects(result)
+        
         if confirmed:
             logger.info(f"Conversation resumed successfully: {conversation_id}")
-            return {"status": "completed", "result": result}
+            return {"status": "completed", "result": serialized_result}
         else:
             logger.info(f"Conversation cancelled by user: {conversation_id}")
-            return {"status": "cancelled", "result": result}
+            return {"status": "cancelled", "result": serialized_result}
             
     except Exception as e:
         logger.error(f"Error resuming conversation {conversation_id}: {str(e)}")
