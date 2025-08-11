@@ -130,12 +130,12 @@ def create_simple_confirmation_wrapper(
                 raise
         
         # Create new StructuredTool with the wrapped function
+        # Since wrapped_func is async, only provide coroutine, not func
         return StructuredTool(
             name=original_tool.name,
             description=tool_description or original_tool.description,
-            func=wrapped_func,
+            coroutine=wrapped_func,  # Only provide coroutine for async function
             args_schema=original_tool.args_schema if hasattr(original_tool, 'args_schema') else None,
-            coroutine=wrapped_func  # This makes it async
         )
     else:
         # Handle regular functions (fallback)
