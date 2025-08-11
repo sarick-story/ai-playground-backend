@@ -545,7 +545,7 @@ async def _run_agent_impl(
                                     pass
                             
                             async def on_chain_error(self, error, **kwargs):
-                                """Handle chain errors, especially interrupts."""
+                                """Handle chain errors (but not interrupts - those are handled via stream mode)."""
                                 try:
                                     # Import Command to check instance
                                     from langgraph.types import Command
@@ -555,30 +555,12 @@ async def _run_agent_impl(
                                         logger.debug(f"LangGraph Command detected (normal flow control): {type(error).__name__}")
                                         return  # Commands are normal flow control, not errors
                                     
-                                    # Check if this is an interrupt
+                                    # Check if this is an interrupt - let stream mode handle it, don't treat as error
                                     if hasattr(error, '__class__') and 'interrupt' in str(error.__class__).lower():
-                                        logger.info(f"Interrupt detected: {error}")
-                                        
-                                        # Extract interrupt data if available
-                                        interrupt_data = getattr(error, 'interrupts', None) or getattr(error, 'interrupt_data', None)
-                                        
-                                        if interrupt_data:
-                                            # Send interrupt message to frontend
-                                            if isinstance(interrupt_data, list) and len(interrupt_data) > 0:
-                                                interrupt_info = interrupt_data[0]
-                                            elif isinstance(interrupt_data, dict):
-                                                interrupt_info = interrupt_data
-                                            else:
-                                                interrupt_info = {"type": "unknown_interrupt", "data": str(interrupt_data)}
-                                            
-                                            # Format for frontend detection
-                                            interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
-                                            await queue.put(interrupt_message)
-                                            
-                                            logger.info("Interrupt message sent to frontend")
-                                            return
+                                        logger.debug(f"Interrupt detected in callback - will be handled by stream mode: {error}")
+                                        return  # Let astream handle interrupts naturally
                                     
-                                    # If not an interrupt or command, handle as regular error
+                                    # Handle genuine errors (not interrupts)
                                     error_msg = f"\nError: {str(error)}\n"
                                     logger.error(f"Chain error: {error}")
                                     await queue.put(error_msg)
@@ -648,41 +630,109 @@ async def _run_agent_impl(
                             "callbacks": callbacks
                         }
                         
-                        try:
-                            result = await supervisor.ainvoke(
-                                {"messages": messages},
-                                config=thread_config
-                            )
-                            logger.info("Supervisor system completed execution with streaming")
-                            logger.info(f"Supervisor result: {result}")
+                        # Use astream with proper stream mode to handle interrupts
+                        final_result = None
+                        async for chunk in supervisor.astream(
+                            {"messages": messages},
+                            config=thread_config,
+                            stream_mode=["values", "updates"]
+                        ):
+                            logger.info(f"🔄 Stream chunk type: {type(chunk)}")
+                            if isinstance(chunk, dict) and "__interrupt__" in chunk:
+                                logger.info(f"🔄 Found interrupt in chunk keys: {chunk.keys()}")
+                            elif isinstance(chunk, tuple) and len(chunk) == 2:
+                                mode, data = chunk
+                                logger.info(f"🔄 Tuple chunk - mode: {mode}, data keys: {data.keys() if isinstance(data, dict) else type(data)}")
+                                if isinstance(data, dict) and "__interrupt__" in data:
+                                    logger.info(f"🔄 Found interrupt in tuple data keys: {data.keys()}")
+                            else:
+                                logger.debug(f"🔄 Other chunk: {chunk}")
+                            
+                            # Handle different stream modes
+                            if isinstance(chunk, tuple) and len(chunk) == 2:
+                                mode, data = chunk
+                                
+                                if mode == "values":
+                                    # Store the latest state
+                                    final_result = data
+                                    
+                                    # Check for interrupts in the state
+                                    if "__interrupt__" in data:
+                                        interrupts = data["__interrupt__"]
+                                        if interrupts:
+                                            interrupt_data = interrupts[0]  # Get first interrupt
+                                            if hasattr(interrupt_data, 'value'):
+                                                interrupt_info = interrupt_data.value
+                                            else:
+                                                interrupt_info = interrupt_data
+                                            
+                                            # Send interrupt to frontend
+                                            interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
+                                            logger.info(f"Sending interrupt to frontend: {interrupt_info.get('interrupt_id', 'unknown')}")
+                                            await queue.put(interrupt_message)
+                                            
+                                            # Don't send done=True, wait for frontend confirmation
+                                            return {"status": "interrupted", "conversation_id": conversation_id, "interrupt_data": interrupt_info}
+                                
+                                elif mode == "updates":
+                                    # Handle node updates and check for interrupts
+                                    logger.debug(f"Node update: {data}")
+                                    
+                                    # Check for interrupts in updates mode too
+                                    if "__interrupt__" in data:
+                                        interrupts = data["__interrupt__"]
+                                        if interrupts:
+                                            interrupt_data = interrupts[0]  # Get first interrupt
+                                            if hasattr(interrupt_data, 'value'):
+                                                interrupt_info = interrupt_data.value
+                                            else:
+                                                interrupt_info = interrupt_data
+                                            
+                                            # Send interrupt to frontend
+                                            interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
+                                            logger.info(f"✅ Sending interrupt to frontend from updates mode: {interrupt_info.get('interrupt_id', 'unknown')}")
+                                            await queue.put(interrupt_message)
+                                            
+                                            # Don't send done=True, wait for frontend confirmation
+                                            return {"status": "interrupted", "conversation_id": conversation_id, "interrupt_data": interrupt_info}
+                            
+                            elif isinstance(chunk, dict):
+                                # Direct state update
+                                final_result = chunk
+                                
+                                # Check for interrupts
+                                if "__interrupt__" in chunk:
+                                    interrupts = chunk["__interrupt__"]
+                                    if interrupts:
+                                        interrupt_data = interrupts[0]
+                                        if hasattr(interrupt_data, 'value'):
+                                            interrupt_info = interrupt_data.value
+                                        else:
+                                            interrupt_info = interrupt_data
+                                        
+                                        interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
+                                        logger.info(f"Sending interrupt to frontend: {interrupt_info.get('interrupt_id', 'unknown')}")
+                                        await queue.put(interrupt_message)
+                                        
+                                        return {"status": "interrupted", "conversation_id": conversation_id, "interrupt_data": interrupt_info}
+                        
+                        # If we get here, execution completed without interrupts
+                        logger.info("Supervisor system completed execution with streaming")
+                        if final_result:
+                            logger.info(f"Final result keys: {final_result.keys() if isinstance(final_result, dict) else 'not dict'}")
                             
                             # Extract and send the final AI response to frontend
-                            if result and "messages" in result:
-                                messages_result = result["messages"]
+                            if isinstance(final_result, dict) and "messages" in final_result:
+                                messages_result = final_result["messages"]
                                 # Find the last AI message
                                 for msg in reversed(messages_result):
                                     if hasattr(msg, 'content') and msg.content and hasattr(msg, '__class__') and 'AI' in str(msg.__class__):
                                         logger.info(f"Sending final AI response: {msg.content}")
                                         await queue.put(msg.content)
                                         break
-                            
-                            await queue.put({"done": True})
-                            return result
-                        except Exception as e:
-                            error_msg = f"Error during supervisor execution: {str(e)}"
-                            logger.error(error_msg)
-                            logger.error(traceback.format_exc())
-                            
-                            # Check if this is an interrupt that needs frontend handling
-                            if 'interrupt' in str(e).lower():
-                                logger.info("Interrupt detected in supervisor execution")
-                                # The callback handler should have already sent the interrupt message
-                                # Don't send done=True here, wait for frontend confirmation
-                                return {"status": "interrupted", "conversation_id": conversation_id}
-                            else:
-                                await queue.put(f"\nError: {error_msg}\n")
-                                await queue.put({"done": True})
-                                return {"error": error_msg}
+                        
+                        await queue.put({"done": True})
+                        return final_result
                     
                     else:
                         # Run supervisor without streaming
