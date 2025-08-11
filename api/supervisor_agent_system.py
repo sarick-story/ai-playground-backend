@@ -264,30 +264,72 @@ async def get_agents():
 _interrupted_conversations = {}
 
 def _serialize_langchain_objects(obj):
-    """Recursively serialize LangChain objects (AIMessage, HumanMessage, etc) to JSON-serializable format."""
+    """Recursively serialize LangChain objects and other complex objects to JSON-serializable format."""
+    import json
     from langchain_core.messages import BaseMessage
     
+    # Handle None
+    if obj is None:
+        return None
+        
+    # Handle primitive types
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+        
+    # Handle LangChain messages
     if isinstance(obj, BaseMessage):
         return {
             "type": obj.__class__.__name__,
             "content": obj.content,
-            "additional_kwargs": getattr(obj, 'additional_kwargs', {}),
-            "response_metadata": getattr(obj, 'response_metadata', {}),
-            "tool_calls": getattr(obj, 'tool_calls', []),
-            "usage_metadata": getattr(obj, 'usage_metadata', {}),
+            "additional_kwargs": _serialize_langchain_objects(getattr(obj, 'additional_kwargs', {})),
+            "response_metadata": _serialize_langchain_objects(getattr(obj, 'response_metadata', {})),
+            "tool_calls": _serialize_langchain_objects(getattr(obj, 'tool_calls', [])),
+            "usage_metadata": _serialize_langchain_objects(getattr(obj, 'usage_metadata', {})),
         }
-    elif isinstance(obj, dict):
+        
+    # Handle LangGraph interrupts - extract the value as per LangGraph best practices
+    if hasattr(obj, '__class__') and 'Interrupt' in obj.__class__.__name__:
+        # Extract the interrupt value (this should be JSON-serializable)
+        if hasattr(obj, 'value'):
+            return _serialize_langchain_objects(obj.value)
+        else:
+            return {"type": "interrupt", "details": str(obj)}
+            
+    # Handle dictionaries
+    if isinstance(obj, dict):
+        # Special handling for __interrupt__ key as per LangGraph docs
+        if "__interrupt__" in obj:
+            interrupts = obj["__interrupt__"]
+            if interrupts and len(interrupts) > 0:
+                # Extract just the value from the first interrupt
+                interrupt_value = interrupts[0].value if hasattr(interrupts[0], 'value') else str(interrupts[0])
+                result = obj.copy()
+                result["__interrupt__"] = interrupt_value
+                return {key: _serialize_langchain_objects(value) if key != "__interrupt__" else value for key, value in result.items()}
         return {key: _serialize_langchain_objects(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
+        
+    # Handle lists/tuples
+    if isinstance(obj, (list, tuple)):
         return [_serialize_langchain_objects(item) for item in obj]
-    elif hasattr(obj, '__dict__'):
-        # For other complex objects, try to serialize their dict representation
+        
+    # Handle sets
+    if isinstance(obj, set):
+        return list(obj)
+        
+    # Try to use object's dict if it has one
+    if hasattr(obj, '__dict__'):
         try:
             return _serialize_langchain_objects(obj.__dict__)
         except:
-            return str(obj)
-    else:
+            pass
+            
+    # Try JSON serialization test
+    try:
+        json.dumps(obj)
         return obj
+    except (TypeError, ValueError):
+        # If all else fails, convert to string
+        return str(obj)
 
 
 async def resume_interrupted_conversation(

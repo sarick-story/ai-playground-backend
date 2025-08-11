@@ -255,7 +255,7 @@ async def handle_transaction(request: TransactionRequest):
 @app.post("/interrupt/confirm")
 async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
     """Handle interrupt confirmation from frontend and resume execution."""
-    logger.info(f"Received interrupt confirmation: {request.interrupt_id}, confirmed: {request.confirmed}")
+    logger.info(f"Interrupt confirmation request: {{'interrupt_id': '{request.interrupt_id}', 'conversation_id': '{request.conversation_id}', 'confirmed': {request.confirmed}, 'wallet_address': '{request.wallet_address[:6]}...{request.wallet_address[-4:]}' if request.wallet_address else 'None'}}")
     
     try:
         # Import supervisor system to handle resume
@@ -269,13 +269,20 @@ async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
             wallet_address=request.wallet_address
         )
         
-        return JSONResponse(content={
+        # Create response payload
+        response_payload = {
             "status": "resumed" if request.confirmed else "cancelled",
             "conversation_id": request.conversation_id,
             "result": result
-        })
+        }
+        
+        logger.info(f"Received interrupt confirmation response: {{'status': '{response_payload['status']}', 'conversation_id': '{response_payload['conversation_id']}', 'result': {{'status': '{result.get('status', 'unknown')}', 'result': {{'messages': '[Array]'}} if isinstance(result.get('result', {}), dict) and 'messages' in result.get('result', {}) else str(type(result.get('result', 'N/A')))}}}}")
+        
+        return JSONResponse(content=response_payload)
         
     except Exception as e:
         logger.error(f"Error handling interrupt confirmation: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
