@@ -272,6 +272,8 @@ async def resume_interrupted_conversation(
     """Resume an interrupted conversation after user confirmation."""
     
     import logging
+    from langgraph.types import Command
+    
     logger = logging.getLogger(__name__)
     
     logger.info(f"Resuming conversation {conversation_id} with confirmation: {confirmed}")
@@ -289,20 +291,19 @@ async def resume_interrupted_conversation(
             }
         }
         
-        # Resume the graph execution
+        # Resume the graph execution using proper Command pattern
+        # This is the correct way to resume interrupts in LangGraph 2025
+        result = await supervisor.ainvoke(
+            Command(resume=confirmed),  # Use Command with resume parameter
+            config=thread_config
+        )
+        
         if confirmed:
-            # User confirmed, continue execution
-            result = await supervisor.ainvoke(
-                None,  # Resume from checkpoint, no new input needed
-                config=thread_config
-            )
-            
             logger.info(f"Conversation resumed successfully: {conversation_id}")
             return {"status": "completed", "result": result}
         else:
-            # User rejected, cancel execution
             logger.info(f"Conversation cancelled by user: {conversation_id}")
-            return {"status": "cancelled", "message": "Operation cancelled by user"}
+            return {"status": "cancelled", "result": result}
             
     except Exception as e:
         logger.error(f"Error resuming conversation {conversation_id}: {str(e)}")
