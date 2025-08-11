@@ -608,12 +608,26 @@ def _create_tool_collections(tools):
     import logging
     logger = logging.getLogger(__name__)
     
-    # Helper function to safely wrap tools
-    def safe_wrap(tool_name, description=None):
+    # Define tools that don't need confirmation (read-only tools)
+    SAFE_TOOLS = {
+        'get_license_terms',
+        'get_erc20_token_balance', 
+        'get_spg_nft_contract_minting_fee_and_token',
+        'get_license_minting_fee',
+        'get_license_revenue_share'
+    }
+    
+    # Helper function to wrap tools (only wrap tools that need confirmation)
+    def safe_wrap(tool_name, description=None, force_wrap=False):
         tool = tools.get(tool_name)
         if tool:
-            logger.info(f"Wrapping tool: {tool_name}")
-            return create_simple_confirmation_wrapper(tool, description)
+            # Check if this tool needs confirmation
+            if tool_name in SAFE_TOOLS and not force_wrap:
+                logger.info(f"Using tool directly (no confirmation needed): {tool_name}")
+                return tool  # Return the original tool without wrapping
+            else:
+                logger.info(f"Wrapping tool with confirmation: {tool_name}")
+                return create_simple_confirmation_wrapper(tool, description)
         else:
             logger.warning(f"Tool '{tool_name}' not found in MCP tools")
             return None
@@ -626,6 +640,8 @@ def _create_tool_collections(tools):
     group_tools = []  # No tools in this category yet
     
     ip_account_tools = []
+    # get_erc20_token_balance doesn't need confirmation (read-only)
+    # mint_test_erc20_tokens needs confirmation (creates tokens)
     for tool_name in ["get_erc20_token_balance", "mint_test_erc20_tokens"]:
         wrapped = safe_wrap(tool_name)
         if wrapped:
@@ -633,10 +649,10 @@ def _create_tool_collections(tools):
     
     ip_asset_tools = []
     ip_asset_tool_names = [
-        "mint_and_register_ip_with_terms",
-        "register", 
-        "upload_image_to_ipfs",
-        "create_ip_metadata"
+        "mint_and_register_ip_with_terms",  # Needs confirmation (blockchain tx)
+        "register",  # Needs confirmation (blockchain tx)
+        "upload_image_to_ipfs",  # Needs confirmation (IPFS operation)
+        "create_ip_metadata"  # Needs confirmation (IPFS operation)
     ]
     for tool_name in ip_asset_tool_names:
         wrapped = safe_wrap(tool_name)
@@ -645,9 +661,9 @@ def _create_tool_collections(tools):
     
     license_tools = []
     license_tool_names = [
-        "get_license_terms",
-        "mint_license_tokens", 
-        "attach_license_terms"
+        "get_license_terms",  # Read-only, no confirmation needed
+        "mint_license_tokens",  # Needs confirmation 
+        "attach_license_terms"  # Needs confirmation (blockchain tx)
     ]
     for tool_name in license_tool_names:
         wrapped = safe_wrap(tool_name)
@@ -656,8 +672,8 @@ def _create_tool_collections(tools):
     
     nft_client_tools = []
     nft_tool_names = [
-        "create_spg_nft_collection",
-        "get_spg_nft_contract_minting_fee_and_token"
+        "create_spg_nft_collection",  # Needs confirmation (blockchain tx)
+        "get_spg_nft_contract_minting_fee_and_token"  # Read-only, no confirmation needed
     ]
     for tool_name in nft_tool_names:
         wrapped = safe_wrap(tool_name)
