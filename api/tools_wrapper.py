@@ -89,37 +89,47 @@ def create_simple_confirmation_wrapper(
             # Get tool name
             tool_name = getattr(original_tool, 'name', 'tool')
             
-            # Add unique execution ID to track re-execution
-            import uuid
-            execution_id = str(uuid.uuid4())[:8]
+            # Use a consistent ID based on tool name and args to ensure same interrupt on resume
+            import hashlib
+            import json
+            # Create a deterministic ID from tool name and args
+            id_source = f"{tool_name}:{json.dumps(kwargs, sort_keys=True)}"
+            execution_id = hashlib.md5(id_source.encode()).hexdigest()[:8]
             
-            logger.info(f"🚀 WRAPPER START [{execution_id}] Tool: {tool_name}, Args: {kwargs}")
+            logger.error(f"🚀🚀🚀 WRAPPER START [{execution_id}] Tool: {tool_name}, Args: {kwargs} 🚀🚀🚀")
+            print(f"🚀🚀🚀 WRAPPER START [{execution_id}] Tool: {tool_name}, Args: {kwargs} 🚀🚀🚀")
             
-            # Create standardized interrupt message
-            parameters_dict = {"kwargs": kwargs}
-            
+            # Create standardized interrupt message - use simple value for interrupt
+            # LangGraph needs the EXACT SAME interrupt value on resume
             interrupt_msg = create_simple_confirmation_interrupt(
                 tool_name=tool_name,
-                parameters=parameters_dict
+                parameters=kwargs
             )
             
             # Send standardized interrupt and get the resume response
-            logger.info(f"🚨 [{execution_id}] Sending interrupt for tool {tool_name}")
+            logger.info(f"🚨 [{execution_id}] Calling interrupt for tool {tool_name}")
+            
+            # The interrupt() function has two behaviors:
+            # 1. First call: throws GraphInterrupt to pause execution
+            # 2. After resume: returns the resume value
+            resume_response = None
             try:
-                # The interrupt() function RETURNS the resume value when resumed
                 resume_response = send_standard_interrupt(interrupt_msg)
-                logger.info(f"🚨 [{execution_id}] Interrupt returned resume response: {resume_response}")
+                # If we get here, it means we're on the SECOND execution after resume
+                logger.info(f"✅ [{execution_id}] INTERRUPT RETURNED VALUE (after resume): {resume_response}")
+                logger.info(f"✅ [{execution_id}] Type of resume response: {type(resume_response)}")
                 
-                # Check if user confirmed or cancelled
-                if not resume_response:
-                    logger.info(f"❌ [{execution_id}] User cancelled operation for {tool_name}")
-                    return f"Operation cancelled by user for {tool_name}"
-                    
             except Exception as interrupt_e:
-                logger.error(f"❌ [{execution_id}] Error sending interrupt for {tool_name}: {str(interrupt_e)}")
-                import traceback
-                logger.error(f"❌ [{execution_id}] Interrupt traceback: {traceback.format_exc()}")
+                # This is expected on the FIRST call - GraphInterrupt is thrown to pause execution
+                logger.info(f"🔄 [{execution_id}] GraphInterrupt thrown (first execution) - will resume after confirmation")
+                # Re-raise the GraphInterrupt to let LangGraph handle it
                 raise
+                
+            # Check if user confirmed or cancelled
+            logger.info(f"📋 [{execution_id}] Checking resume response: {resume_response}")
+            if not resume_response:
+                logger.info(f"❌ [{execution_id}] User cancelled or no response - returning cancellation")
+                return f"Operation cancelled by user for {tool_name}"
             
             # This point should only be reached AFTER user confirmation and resume
             logger.info(f"🎯 [{execution_id}] POST-INTERRUPT: User confirmed, executing original tool {tool_name}")
