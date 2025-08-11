@@ -28,6 +28,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["ip_asset_tool"],
         checkpointer=checkpointer,
         store=store,
+        version="v2",  # Prevent tool re-execution after interrupt resume
         prompt=(
             "You are an IP Asset Agent specialized in Story Protocol IP management.\n\n"
             "INSTRUCTIONS:\n"
@@ -47,6 +48,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["ip_account_tool"],
         checkpointer=checkpointer,
         store=store,
+        version="v2",  # Prevent tool re-execution after interrupt resume
         prompt=(
             "You are an IP Account Agent for Story Protocol account management.\n\n"
             "INSTRUCTIONS:\n"
@@ -65,6 +67,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["license_tool"],
         checkpointer=checkpointer,
         store=store,
+        version="v2",  # Prevent tool re-execution after interrupt resume
         prompt=(
             "You are a License Agent for Story Protocol licensing operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -84,6 +87,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["nft_client_tool"],
         checkpointer=checkpointer,
         store=store,
+        version="v2",  # Prevent tool re-execution after interrupt resume
         prompt=(
             "You are an NFT Client Agent for Story Protocol NFT collection management.\n\n"
             "INSTRUCTIONS:\n"
@@ -102,6 +106,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["dispute_tool"],
         checkpointer=checkpointer,
         store=store,
+        version="v2",  # Prevent tool re-execution after interrupt resume
         prompt=(
             "You are a Dispute Agent for Story Protocol dispute management.\n\n"
             "INSTRUCTIONS:\n"
@@ -120,6 +125,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["group_tool"],
         checkpointer=checkpointer,
         store=store,
+        version="v2",  # Prevent tool re-execution after interrupt resume
         prompt=(
             "You are a Group Agent for Story Protocol group operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -136,6 +142,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["permission_tool"],
         checkpointer=checkpointer,
         store=store,
+        version="v2",  # Prevent tool re-execution after interrupt resume
         prompt=(
             "You are a Permission Agent for Story Protocol permission management.\n\n"
             "INSTRUCTIONS:\n"
@@ -152,6 +159,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["royalty_tool"],
         checkpointer=checkpointer,
         store=store,
+        version="v2",  # Prevent tool re-execution after interrupt resume
         prompt=(
             "You are a Royalty Agent for Story Protocol royalty management.\n\n"
             "INSTRUCTIONS:\n"
@@ -170,6 +178,7 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         tools=tool_collections["wip_tool"],
         checkpointer=checkpointer,
         store=store,
+        version="v2",  # Prevent tool re-execution after interrupt resume
         prompt=(
             "You are a WIP Token Agent for Story Protocol wrapped IP token operations.\n\n"
             "INSTRUCTIONS:\n"
@@ -341,6 +350,7 @@ async def resume_interrupted_conversation(
     """Resume an interrupted conversation after user confirmation."""
     
     import logging
+    import asyncio
     from langgraph.types import Command
     
     logger = logging.getLogger(__name__)
@@ -360,12 +370,20 @@ async def resume_interrupted_conversation(
             }
         }
         
-        # Resume the graph execution using proper Command pattern
+        # Resume the graph execution using proper Command pattern with timeout
         # This is the correct way to resume interrupts in LangGraph 2025
-        result = await supervisor.ainvoke(
-            Command(resume=confirmed),  # Use Command with resume parameter
-            config=thread_config
+        logger.info(f"Starting resume with Command(resume={confirmed})")
+        
+        # Add timeout to prevent hanging - 30 seconds should be enough
+        result = await asyncio.wait_for(
+            supervisor.ainvoke(
+                Command(resume=confirmed),  # Use Command with resume parameter
+                config=thread_config
+            ),
+            timeout=30.0  # 30 second timeout
         )
+        
+        logger.info(f"Resume completed for conversation {conversation_id}")
         
         # Serialize the result to handle AIMessage and other LangChain objects
         serialized_result = _serialize_langchain_objects(result)
@@ -377,6 +395,11 @@ async def resume_interrupted_conversation(
             logger.info(f"Conversation cancelled by user: {conversation_id}")
             return {"status": "cancelled", "result": serialized_result}
             
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout resuming conversation {conversation_id} after 30 seconds")
+        return {"status": "error", "error": "Resume operation timed out"}
     except Exception as e:
         logger.error(f"Error resuming conversation {conversation_id}: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         return {"status": "error", "error": str(e)}

@@ -252,21 +252,44 @@ async def handle_transaction(request: TransactionRequest):
         logger.error(f"Error handling transaction: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Track ongoing interrupt confirmations to prevent duplicates
+_active_confirmations = set()
+
 @app.post("/interrupt/confirm")
 async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
     """Handle interrupt confirmation from frontend and resume execution."""
+    confirmation_key = f"{request.conversation_id}:{request.interrupt_id}"
+    
     logger.info(f"Interrupt confirmation request: {{'interrupt_id': '{request.interrupt_id}', 'conversation_id': '{request.conversation_id}', 'confirmed': {request.confirmed}, 'wallet_address': '{request.wallet_address[:6]}...{request.wallet_address[-4:]}' if request.wallet_address else 'None'}}")
+    
+    # Check for duplicate/concurrent requests
+    if confirmation_key in _active_confirmations:
+        logger.warning(f"Duplicate confirmation request for {confirmation_key}, returning existing status")
+        return JSONResponse(content={
+            "status": "already_processing", 
+            "conversation_id": request.conversation_id,
+            "message": "Confirmation already in progress"
+        })
+    
+    # Mark as active
+    _active_confirmations.add(confirmation_key)
     
     try:
         # Import supervisor system to handle resume
         from .supervisor_agent_system import resume_interrupted_conversation
+        import asyncio
         
-        # Resume the conversation with the user's decision
-        result = await resume_interrupted_conversation(
-            conversation_id=request.conversation_id,
-            interrupt_id=request.interrupt_id,
-            confirmed=request.confirmed,
-            wallet_address=request.wallet_address
+        # Resume the conversation with the user's decision - add timeout
+        logger.info(f"Starting interrupt confirmation processing for {confirmation_key}")
+        
+        result = await asyncio.wait_for(
+            resume_interrupted_conversation(
+                conversation_id=request.conversation_id,
+                interrupt_id=request.interrupt_id,
+                confirmed=request.confirmed,
+                wallet_address=request.wallet_address
+            ),
+            timeout=35.0  # 35 second timeout (slightly longer than resume timeout)
         )
         
         # Create response payload
@@ -276,13 +299,22 @@ async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
             "result": result
         }
         
-        logger.info(f"Received interrupt confirmation response: {{'status': '{response_payload['status']}', 'conversation_id': '{response_payload['conversation_id']}', 'result': {{'status': '{result.get('status', 'unknown')}', 'result': {{'messages': '[Array]'}} if isinstance(result.get('result', {}), dict) and 'messages' in result.get('result', {}) else str(type(result.get('result', 'N/A')))}}}}")
+        # Log response (simplified to avoid f-string complexity)
+        result_status = result.get('status', 'unknown')
+        result_summary = "messages array" if isinstance(result.get('result', {}), dict) and 'messages' in result.get('result', {}) else str(type(result.get('result', 'N/A')))
+        logger.info(f"Received interrupt confirmation response: status={response_payload['status']}, conversation_id={response_payload['conversation_id']}, result_status={result_status}, result_type={result_summary}")
         
         return JSONResponse(content=response_payload)
         
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout handling interrupt confirmation for {confirmation_key}")
+        raise HTTPException(status_code=504, detail="Confirmation request timed out")
     except Exception as e:
         logger.error(f"Error handling interrupt confirmation: {str(e)}")
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Always remove from active set
+        _active_confirmations.discard(confirmation_key)
 
