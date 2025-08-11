@@ -656,7 +656,7 @@ async def _run_agent_impl(
             return {"error": error_msg}
         
         server_params = StdioServerParameters(
-            command="python",
+            command="python3",
             args=[server_path],
         )
 
