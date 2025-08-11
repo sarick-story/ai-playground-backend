@@ -1,10 +1,11 @@
 from langgraph.prebuilt import create_react_agent
-from tools_wrapper import create_wrapped_tool_collections
+from .tools_wrapper import create_wrapped_tool_collections
 
 from langgraph_supervisor import create_supervisor
 from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
+from typing import Optional
 
 
 async def create_all_agents(checkpointer=None, store=None):
@@ -254,3 +255,51 @@ async def get_agents():
             "agents": agents
         }
     return _supervisor_cache["agents"]
+
+# Track interrupted conversations
+_interrupted_conversations = {}
+
+async def resume_interrupted_conversation(
+    conversation_id: str,
+    interrupt_id: str,
+    confirmed: bool,
+    wallet_address: Optional[str] = None
+):
+    """Resume an interrupted conversation after user confirmation."""
+    
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"Resuming conversation {conversation_id} with confirmation: {confirmed}")
+    
+    try:
+        # Get the supervisor system
+        supervisor = await get_supervisor()
+        
+        # Create thread config to resume from checkpoint
+        thread_config = {
+            "configurable": {
+                "thread_id": conversation_id,
+                "checkpoint_ns": "",
+                "wallet_address": wallet_address
+            }
+        }
+        
+        # Resume the graph execution
+        if confirmed:
+            # User confirmed, continue execution
+            result = await supervisor.ainvoke(
+                None,  # Resume from checkpoint, no new input needed
+                config=thread_config
+            )
+            
+            logger.info(f"Conversation resumed successfully: {conversation_id}")
+            return {"status": "completed", "result": result}
+        else:
+            # User rejected, cancel execution
+            logger.info(f"Conversation cancelled by user: {conversation_id}")
+            return {"status": "cancelled", "message": "Operation cancelled by user"}
+            
+    except Exception as e:
+        logger.error(f"Error resuming conversation {conversation_id}: {str(e)}")
+        return {"status": "error", "error": str(e)}

@@ -34,6 +34,12 @@ class TransactionRequest(BaseModel):
     wallet_address: str
     private_key: Optional[str] = None
 
+class InterruptConfirmationRequest(BaseModel):
+    interrupt_id: str
+    conversation_id: str
+    confirmed: bool
+    wallet_address: Optional[str] = None
+
 def is_transaction_intent(message: str) -> bool:
     """Detect if a message contains a transaction intent"""
     # Simple pattern matching for 'send X IP to ADDRESS'
@@ -244,5 +250,32 @@ async def handle_transaction(request: TransactionRequest):
         
     except Exception as e:
         logger.error(f"Error handling transaction: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/interrupt/confirm")
+async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
+    """Handle interrupt confirmation from frontend and resume execution."""
+    logger.info(f"Received interrupt confirmation: {request.interrupt_id}, confirmed: {request.confirmed}")
+    
+    try:
+        # Import supervisor system to handle resume
+        from .supervisor_agent_system import resume_interrupted_conversation
+        
+        # Resume the conversation with the user's decision
+        result = await resume_interrupted_conversation(
+            conversation_id=request.conversation_id,
+            interrupt_id=request.interrupt_id,
+            confirmed=request.confirmed,
+            wallet_address=request.wallet_address
+        )
+        
+        return JSONResponse(content={
+            "status": "resumed" if request.confirmed else "cancelled",
+            "conversation_id": request.conversation_id,
+            "result": result
+        })
+        
+    except Exception as e:
+        logger.error(f"Error handling interrupt confirmation: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 

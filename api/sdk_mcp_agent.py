@@ -4,6 +4,7 @@ from mcp.client.stdio import stdio_client, get_default_environment
 from langchain_mcp_adapters.tools import load_mcp_tools # type: ignore
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
+from .supervisor_agent_system import get_supervisor, create_supervisor_system
 import os
 import asyncio
 import asyncio.subprocess  # Import at the module level to avoid local variable issue
@@ -664,47 +665,20 @@ async def _run_agent_impl(
             async with stdio_client(server_params) as (read, write):
                 logger.info("Stdio client initialized, creating session")
                 async with ClientSession(read, write) as session:
-                    # Initialize the connection
-                    logger.info("Initializing MCP session")
-                    await session.initialize()
-                    logger.info("MCP session initialized successfully")
-
-                    # Load ALL MCP tools automatically using the proper LangChain MCP adapter
-                    logger.info("Loading MCP tools")
-                    tools = await load_mcp_tools(session)
-                    logger.info(f"Loaded {len(tools)} MCP tools")
+                    # Skip MCP tool loading since supervisor system handles this internally
+                    logger.info("Using supervisor system - MCP tools loaded internally")
                     
-                    # Log tool names for debugging
-                    tool_names = [tool.name for tool in tools]
-                    logger.info(f"Available tools: {', '.join(tool_names)}")
-
-                    # Use ALL MCP tools from the Story Protocol SDK server
-                    if not tools:
-                        error_msg = "No MCP tools found, cannot process Story Protocol requests"
-                        logger.error(error_msg)
-                        if queue:
-                            await queue.put(f"Error: {error_msg}")
-                            await queue.put({"done": True})
-                        return {"error": error_msg}
-                    else:
-                        tool_names = [t.name for t in tools]
-                        logger.info(f"Using Story Protocol tools: {', '.join(tool_names)}")
-                    
-                    # Inject wallet address into tool context if provided
+                    # Log wallet address if provided
                     if wallet_address:
                         logger.info(f"Using wallet address: {wallet_address}")
 
-                    # Create agent with tools and message history
-                    logger.info("Creating agent with tools and system prompt")
-                    agent = create_react_agent(
-                        model,
-                        tools,
-                        state_modifier=system_prompt
-                    )
-
-                    # Prepare messages for agent
+                    # Use supervisor system instead of single agent
+                    logger.info("Using supervisor system with specialized agents")
+                    supervisor, supervisor_agents = await create_supervisor_system()
+                    
+                    # Prepare messages for supervisor
                     messages = message_history or [{"role": "user", "content": user_message}]
-                    logger.info(f"Prepared {len(messages)} messages for the agent")
+                    logger.info(f"Prepared {len(messages)} messages for the supervisor")
 
                     if queue:
                         # Define the streaming handler directly before using it
@@ -732,6 +706,43 @@ async def _run_agent_impl(
                                     logger.warning(f"Error processing token, skipping: {str(e)}")
                                     # If there's an error, just skip this token
                                     pass
+                            
+                            async def on_chain_error(self, error, **kwargs):
+                                """Handle chain errors, especially interrupts."""
+                                try:
+                                    # Check if this is an interrupt
+                                    if hasattr(error, '__class__') and 'interrupt' in str(error.__class__).lower():
+                                        logger.info(f"Interrupt detected: {error}")
+                                        
+                                        # Extract interrupt data if available
+                                        interrupt_data = getattr(error, 'interrupts', None) or getattr(error, 'interrupt_data', None)
+                                        
+                                        if interrupt_data:
+                                            # Send interrupt message to frontend
+                                            from .interrupt_handler import StandardInterruptMessage
+                                            
+                                            if isinstance(interrupt_data, list) and len(interrupt_data) > 0:
+                                                interrupt_info = interrupt_data[0]
+                                            elif isinstance(interrupt_data, dict):
+                                                interrupt_info = interrupt_data
+                                            else:
+                                                interrupt_info = {"type": "unknown_interrupt", "data": str(interrupt_data)}
+                                            
+                                            # Format for frontend detection
+                                            interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
+                                            await queue.put(interrupt_message)
+                                            
+                                            logger.info("Interrupt message sent to frontend")
+                                            return
+                                    
+                                    # If not an interrupt, handle as regular error
+                                    error_msg = f"\nError: {str(error)}\n"
+                                    logger.error(f"Chain error: {error}")
+                                    await queue.put(error_msg)
+                                    
+                                except Exception as e:
+                                    logger.error(f"Error handling chain error: {e}")
+                                    await queue.put(f"\nUnexpected error occurred\n")
                             
                             async def on_tool_start(self, serialized, input_dict, **kwargs):
                                 tool_call_id = str(kwargs.get("run_id", uuid.uuid4()))  # Convert UUID to string
@@ -781,35 +792,67 @@ async def _run_agent_impl(
                         
                         callbacks = [StreamingCallbackHandler()]
                         
-                        # Run agent with streaming
-                        logger.info(f"Starting SDK MCP agent with streaming in task context: {task_token}")
+                        # Run supervisor with streaming
+                        logger.info(f"Starting supervisor system with streaming in task context: {task_token}")
+                        
+                        # Create thread config for persistence
+                        thread_config = {
+                            "configurable": {
+                                "thread_id": conversation_id or str(uuid.uuid4()),
+                                "checkpoint_ns": "",
+                                "wallet_address": wallet_address  # Pass wallet to tools
+                            },
+                            "callbacks": callbacks
+                        }
+                        
                         try:
-                            result = await agent.ainvoke(
+                            result = await supervisor.ainvoke(
                                 {"messages": messages},
-                                config={"callbacks": callbacks}
+                                config=thread_config
                             )
-                            logger.info("SDK MCP agent completed execution with streaming")
-                            logger.info(f"Agent result: {result}")
+                            logger.info("Supervisor system completed execution with streaming")
+                            logger.info(f"Supervisor result: {result}")
                             await queue.put({"done": True})
                             return result
                         except Exception as e:
-                            error_msg = f"Error during agent execution: {str(e)}"
+                            error_msg = f"Error during supervisor execution: {str(e)}"
                             logger.error(error_msg)
                             logger.error(traceback.format_exc())
-                            await queue.put(f"\nError: {error_msg}\n")
-                            await queue.put({"done": True})
-                            return {"error": error_msg}
+                            
+                            # Check if this is an interrupt that needs frontend handling
+                            if 'interrupt' in str(e).lower():
+                                logger.info("Interrupt detected in supervisor execution")
+                                # The callback handler should have already sent the interrupt message
+                                # Don't send done=True here, wait for frontend confirmation
+                                return {"status": "interrupted", "conversation_id": conversation_id}
+                            else:
+                                await queue.put(f"\nError: {error_msg}\n")
+                                await queue.put({"done": True})
+                                return {"error": error_msg}
                     
                     else:
-                        # Run without streaming
-                        logger.info("Starting SDK MCP agent without streaming")
+                        # Run supervisor without streaming
+                        logger.info("Starting supervisor system without streaming")
+                        
+                        # Create thread config for persistence
+                        thread_config = {
+                            "configurable": {
+                                "thread_id": conversation_id or str(uuid.uuid4()),
+                                "checkpoint_ns": "",
+                                "wallet_address": wallet_address
+                            }
+                        }
+                        
                         try:
-                            result = await agent.ainvoke({"messages": messages})
-                            logger.info("SDK MCP agent completed execution without streaming")
-                            logger.info(f"Agent result: {result}")
+                            result = await supervisor.ainvoke(
+                                {"messages": messages},
+                                config=thread_config
+                            )
+                            logger.info("Supervisor system completed execution without streaming")
+                            logger.info(f"Supervisor result: {result}")
                             return result
                         except Exception as e:
-                            error_msg = f"Error during agent execution: {str(e)}"
+                            error_msg = f"Error during supervisor execution: {str(e)}"
                             logger.error(error_msg)
                             logger.error(traceback.format_exc())
                             return {"error": error_msg}

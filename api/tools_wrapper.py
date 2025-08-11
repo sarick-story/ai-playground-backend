@@ -13,6 +13,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools  # type: ignore
 from langgraph.prebuilt import interrupt, InjectedStore, InjectedState  # Import interrupt, InjectedStore and InjectedState
 from langgraph.store.base import BaseStore
 from langgraph.types import Command
+from .interrupt_handler import create_simple_confirmation_interrupt, create_transaction_interrupt, FeeInformation, send_standard_interrupt
 
 
 
@@ -84,20 +85,19 @@ def create_simple_confirmation_wrapper(
         # Get tool name for both functions and StructuredTool objects
         tool_name = getattr(original_tool, '__name__', getattr(original_tool, 'name', 'tool'))
         
-        # Create interrupt message
-        interrupt_message = {
-            "type": "tool_confirmation",
-            "tool_name": tool_name,
-            "description": tool_description or f"Execute {tool_name}",
-            "parameters": {
-                "args": list(args) if args else [],
-                "kwargs": dict(kwargs) if kwargs else {}
-            },
-            "message": f"Please confirm execution of {tool_name}"
+        # Create standardized interrupt message
+        parameters_dict = {
+            "args": list(args) if args else [],
+            "kwargs": dict(kwargs) if kwargs else {}
         }
         
-        # Interrupt for confirmation
-        interrupt(interrupt_message)
+        interrupt_msg = create_simple_confirmation_interrupt(
+            tool_name=tool_name,
+            parameters=parameters_dict
+        )
+        
+        # Send standardized interrupt
+        send_standard_interrupt(interrupt_msg)
         
         # Execute after confirmation
         if is_async:
@@ -256,18 +256,26 @@ def wrap_mint_and_register_ip_with_terms(
                 display_info["total_cost"] = f"SPG fee: {fee_info['fee_display']} + License minting fee: {minting_fee} wei"
                 display_info["contract_type"] = "Custom SPG contract (with fees)"
         
-        # Create interrupt message
-        interrupt_message = {
-            "type": "tool_confirmation",
-            "tool_name": "mint_and_register_ip_with_terms",
-            "operation": "Mint NFT, Register IP, and Attach License Terms",
-            "parameters": interrupt_params,
-            "fee_information": display_info if display_info else {"note": "No SPG contract fees"},
-            "message": "Please confirm this blockchain transaction"
-        }
+        # Create standardized interrupt message with fee information
+        fee_information = None
+        if fee_info and fee_info.get("minting_fee", 0) > 0:
+            fee_information = FeeInformation(
+                fee_amount=str(fee_info["minting_fee"]),
+                fee_token=fee_info["fee_token"],
+                fee_display=fee_info["fee_display"],
+                total_cost=display_info.get("total_cost")
+            )
         
-        # Interrupt for user confirmation
-        interrupt(interrupt_message)
+        interrupt_msg = create_transaction_interrupt(
+            tool_name="mint_and_register_ip_with_terms",
+            operation="Mint NFT, Register IP, and Attach License Terms",
+            parameters=interrupt_params,
+            fee_info=fee_information,
+            gas_estimate="~300,000 gas"
+        )
+        
+        # Send standardized interrupt
+        send_standard_interrupt(interrupt_msg)
         
         # After confirmation, prepare final parameters
         final_params = {
@@ -423,23 +431,33 @@ def wrap_mint_license_tokens(
             fee_display["revenue_share"] = f"{max_revenue_share}%"
             fee_display["total_cost"] = f"{max_minting_fee * amount} wei for {amount} tokens"
         
-        # Create interrupt message
-        interrupt_message = {
-            "type": "tool_confirmation",
-            "tool_name": "mint_license_tokens",
-            "operation": "Mint License Tokens",
-            "parameters": interrupt_params,
-            "fee_information": fee_display,
-            "blockchain_impact": {
-                "action": f"Mints {amount} license token(s) for IP {licensor_ip_id}",
-                "network": "Story Protocol",
-                "estimated_gas": "~200,000 gas"
-            },
-            "message": "Please confirm this license token minting transaction"
-        }
+        # Create standardized interrupt message with fee information
+        fee_information = None
+        if precheck_info:
+            fee_information = FeeInformation(
+                fee_amount=str(precheck_info["minting_fee"]),
+                fee_token="WIP",  # License tokens are typically paid in WIP
+                fee_display=precheck_info["fee_display"],
+                total_cost=f"{precheck_info['minting_fee'] * amount} wei for {amount} tokens"
+            )
+        elif max_minting_fee:
+            fee_information = FeeInformation(
+                fee_amount=str(max_minting_fee),
+                fee_token="WIP",
+                fee_display=f"{max_minting_fee} wei",
+                total_cost=f"{max_minting_fee * amount} wei for {amount} tokens"
+            )
         
-        # Interrupt for user confirmation
-        interrupt(interrupt_message)
+        interrupt_msg = create_transaction_interrupt(
+            tool_name="mint_license_tokens",
+            operation="Mint License Tokens",
+            parameters=interrupt_params,
+            fee_info=fee_information,
+            gas_estimate="~200,000 gas"
+        )
+        
+        # Send standardized interrupt
+        send_standard_interrupt(interrupt_msg)
         
         # Prepare final parameters
         final_params = {
