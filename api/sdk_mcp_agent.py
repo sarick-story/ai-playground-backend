@@ -5,6 +5,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools # type: ignore
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 from .supervisor_agent_system import get_supervisor, create_supervisor_system
+from .mcp_session_manager import get_mcp_session_manager, cleanup_mcp_session
 import os
 import asyncio
 import asyncio.subprocess  # Import at the module level to avoid local variable issue
@@ -438,49 +439,26 @@ async def create_transaction_request(to_address: str, amount: str, queue: asynci
                 pass
         return False
 
-# Global variable to track MCP session
-_mcp_session = None
-
 # Add this function to handle clean shutdown
 async def close_mcp_session():
-    """Close the MCP session and terminate any subprocess."""
-    global _mcp_session
-    
-    if _mcp_session is not None:
-        logger.info("Closing MCP session during shutdown")
-        try:
-            # Try to close the session first
-            await _mcp_session.aclose()
-        except Exception as e:
-            logger.warning(f"Error closing session: {str(e)}")
-        
-        # Then terminate the process if it exists
-        if hasattr(_mcp_session, '_process') and _mcp_session._process:
-            try:
-                logger.info(f"Terminating subprocess with PID: {_mcp_session._process.pid}")
-                _mcp_session._process.terminate()
-                # Wait briefly for the process to terminate
-                try:
-                    await asyncio.wait_for(_mcp_session._process.wait(), 2.0)
-                except asyncio.TimeoutError:
-                    # If it doesn't terminate, kill it
-                    logger.warning("Subprocess did not terminate, killing it")
-                    _mcp_session._process.kill()
-            except Exception as e:
-                logger.warning(f"Error terminating subprocess: {str(e)}")
-        
-        _mcp_session = None
+    """Close the MCP session using the session manager."""
+    logger.info("Closing MCP session during shutdown")
+    try:
+        await cleanup_mcp_session()
+    except Exception as e:
+        logger.warning(f"Error closing session: {str(e)}")
 
 # Add these lines to ensure the session is properly closed when the application terminates
 def cleanup_session():
     """Synchronous cleanup function for atexit hook."""
-    global _mcp_session
-    if _mcp_session is not None and hasattr(_mcp_session, '_process') and _mcp_session._process:
-        try:
-            logger.info(f"Terminating subprocess with PID: {_mcp_session._process.pid}")
-            _mcp_session._process.terminate()
-        except Exception as e:
-            logger.warning(f"Error during cleanup: {str(e)}")
+    try:
+        # Try to run the async cleanup in a new event loop
+        import asyncio
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(cleanup_mcp_session())
+        loop.close()
+    except Exception as e:
+        logger.warning(f"Error during cleanup: {str(e)}")
 
 # Register the cleanup function
 atexit.register(cleanup_session)
@@ -620,70 +598,26 @@ async def _run_agent_impl(
                 await queue.put({"done": True})
             return {"error": error_msg}
         
-        # Create fresh MCP session and execute agent within session context
-        # Find the server path
-        server_path = os.environ.get("SDK_MCP_SERVER_PATH")
-        if not server_path:
-            # Try multiple possible locations for server.py
-            possible_paths = [
-                # Relative path from parent directory
-                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                             "story-mcp-hub/story-sdk-mcp/server.py"),
-            ]
-            
-            # Try each path
-            for path in possible_paths:
-                if os.path.exists(path):
-                    server_path = path
-                    break
-            
-            if not server_path:
-                error_msg = "Could not find story-sdk-mcp server.py"
-                logger.error(error_msg)
-                if queue:
-                    await queue.put(f"Error: {error_msg}")
-                    await queue.put({"done": True})
-                return {"error": error_msg}
-        
-        logger.info(f"SDK MCP Server path: {server_path}")
-        
-        if not os.path.exists(server_path):
-            error_msg = f"SDK MCP server file not found at {server_path}"
-            logger.error(error_msg)
-            if queue:
-                await queue.put(f"Error: {error_msg}")
-                await queue.put({"done": True})
-            return {"error": error_msg}
-        
-        server_params = StdioServerParameters(
-            command="python3",
-            args=[server_path],
-        )
-
+        # Use the MCP session manager for persistent session
         try:
-            logger.info("Initializing stdio client")
-            async with stdio_client(server_params) as (read, write):
-                logger.info("Stdio client initialized, creating session")
-                async with ClientSession(read, write) as session:
-                    # Load MCP tools to pass to supervisor system
-                    logger.info("Loading MCP tools for supervisor system")
-                    await session.initialize()
-                    tools = await load_mcp_tools(session)
-                    logger.info(f"Loaded {len(tools)} MCP tools")
+            logger.info("Getting MCP session manager")
+            session_manager = await get_mcp_session_manager()
+            tools = await session_manager.get_tools()
+            logger.info(f"Got {len(tools)} MCP tools from session manager")
                     
-                    # Log wallet address if provided
-                    if wallet_address:
-                        logger.info(f"Using wallet address: {wallet_address}")
+            # Log wallet address if provided
+            if wallet_address:
+                logger.info(f"Using wallet address: {wallet_address}")
 
-                    # Use supervisor system with active MCP tools
-                    logger.info("Using supervisor system with specialized agents")
-                    supervisor, supervisor_agents = await create_supervisor_system(mcp_tools=tools)
+            # Use supervisor system with active MCP tools
+            logger.info("Using supervisor system with specialized agents")
+            supervisor, supervisor_agents = await create_supervisor_system(mcp_tools=tools)
                     
-                    # Prepare messages for supervisor
-                    messages = message_history or [{"role": "user", "content": user_message}]
-                    logger.info(f"Prepared {len(messages)} messages for the supervisor")
+            # Prepare messages for supervisor
+            messages = message_history or [{"role": "user", "content": user_message}]
+            logger.info(f"Prepared {len(messages)} messages for the supervisor")
 
-                    if queue:
+            if queue:
                         # Define the streaming handler directly before using it
                         class StreamingCallbackHandler(BaseCallbackHandler):
                             run_inline = True
@@ -852,35 +786,35 @@ async def _run_agent_impl(
                                 await queue.put({"done": True})
                                 return {"error": error_msg}
                     
-                    else:
-                        # Run supervisor without streaming
-                        logger.info("Starting supervisor system without streaming")
+            else:
+                # Run supervisor without streaming
+                logger.info("Starting supervisor system without streaming")
                         
-                        # Create thread config for persistence
-                        thread_config = {
-                            "configurable": {
-                                "thread_id": conversation_id or str(uuid.uuid4()),
-                                "checkpoint_ns": "",
-                                "wallet_address": wallet_address
-                            }
-                        }
-                        
-                        try:
-                            result = await supervisor.ainvoke(
-                                {"messages": messages},
-                                config=thread_config
-                            )
-                            logger.info("Supervisor system completed execution without streaming")
-                            logger.info(f"Supervisor result: {result}")
-                            return result
-                        except Exception as e:
-                            error_msg = f"Error during supervisor execution: {str(e)}"
-                            logger.error(error_msg)
-                            logger.error(traceback.format_exc())
-                            return {"error": error_msg}
+                # Create thread config for persistence
+                thread_config = {
+                    "configurable": {
+                        "thread_id": conversation_id or str(uuid.uuid4()),
+                        "checkpoint_ns": "",
+                        "wallet_address": wallet_address
+                    }
+                }
+                
+                try:
+                    result = await supervisor.ainvoke(
+                        {"messages": messages},
+                        config=thread_config
+                    )
+                    logger.info("Supervisor system completed execution without streaming")
+                    logger.info(f"Supervisor result: {result}")
+                    return result
+                except Exception as e:
+                    error_msg = f"Error during supervisor execution: {str(e)}"
+                    logger.error(error_msg)
+                    logger.error(traceback.format_exc())
+                    return {"error": error_msg}
         
         except Exception as e:
-            error_msg = f"Failed to create MCP session: {str(e)}"
+            error_msg = f"Failed to get MCP tools: {str(e)}"
             logger.error(error_msg)
             logger.error(traceback.format_exc())
             if queue:

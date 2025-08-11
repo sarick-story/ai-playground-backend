@@ -77,6 +77,9 @@ def create_simple_confirmation_wrapper(
     """
     from langchain_core.tools import StructuredTool
     from .interrupt_handler import create_simple_confirmation_interrupt, send_standard_interrupt
+    import logging
+    
+    logger = logging.getLogger(__name__)
     
     # For StructuredTool objects, create a new StructuredTool with wrapped functionality
     if hasattr(original_tool, 'invoke'):
@@ -98,7 +101,33 @@ def create_simple_confirmation_wrapper(
             send_standard_interrupt(interrupt_msg)
             
             # Execute original tool after confirmation
-            return await original_tool.ainvoke(kwargs)
+            # Check if tool has ainvoke (async) or just invoke (sync)
+            try:
+                logger.debug(f"Executing tool {tool_name} with kwargs: {kwargs}")
+                
+                if hasattr(original_tool, 'ainvoke'):
+                    logger.debug(f"Using ainvoke for {tool_name}")
+                    result = await original_tool.ainvoke(kwargs)
+                elif hasattr(original_tool, 'invoke'):
+                    logger.debug(f"Using invoke for {tool_name}")
+                    # If only invoke is available, call it (MCP tools might be sync)
+                    result = original_tool.invoke(kwargs)
+                    # If result is awaitable, await it
+                    if inspect.isawaitable(result):
+                        result = await result
+                else:
+                    # Fallback to calling as function
+                    logger.debug(f"Using direct call for {tool_name}")
+                    result = await original_tool(**kwargs) if inspect.iscoroutinefunction(original_tool) else original_tool(**kwargs)
+                
+                logger.debug(f"Tool {tool_name} executed successfully")
+                return result
+                
+            except Exception as e:
+                logger.error(f"Error executing tool {tool_name}: {str(e)}")
+                logger.error(f"Tool type: {type(original_tool)}")
+                logger.error(f"Tool attributes: {dir(original_tool)}")
+                raise
         
         # Create new StructuredTool with the wrapped function
         return StructuredTool(
@@ -212,9 +241,17 @@ def wrap_mint_and_register_ip_with_terms(
                             break
                     
                     if get_spg_fee_tool:
-                        fee_result = await get_spg_fee_tool.invoke({
-                            "spg_nft_contract": spg_nft_contract
-                        })
+                        # Handle both async and sync invoke
+                        if hasattr(get_spg_fee_tool, 'ainvoke'):
+                            fee_result = await get_spg_fee_tool.ainvoke({
+                                "spg_nft_contract": spg_nft_contract
+                            })
+                        else:
+                            fee_result = get_spg_fee_tool.invoke({
+                                "spg_nft_contract": spg_nft_contract
+                            })
+                            if inspect.isawaitable(fee_result):
+                                fee_result = await fee_result
                         
                         # Parse the result to extract fee and token
                         # The actual format will depend on the tool's return value
@@ -568,13 +605,17 @@ async def create_wrapped_tool_collections():
 
 def _create_tool_collections(tools):
     """Internal function to create tool collections from tools dictionary."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     # Helper function to safely wrap tools
     def safe_wrap(tool_name, description=None):
         tool = tools.get(tool_name)
         if tool:
+            logger.info(f"Wrapping tool: {tool_name}")
             return create_simple_confirmation_wrapper(tool, description)
         else:
-            print(f"Warning: Tool '{tool_name}' not found in MCP tools")
+            logger.warning(f"Tool '{tool_name}' not found in MCP tools")
             return None
     
     # Create tool collections
