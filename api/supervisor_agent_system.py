@@ -1,11 +1,72 @@
 from langgraph.prebuilt import create_react_agent
 from .tools_wrapper import create_wrapped_tool_collections, create_wrapped_tool_collections_from_tools
-
+from langchain_core.tools import tool
 from langgraph_supervisor import create_supervisor
 from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
-from typing import Optional
+from typing import Optional, List
+from langgraph.types import interrupt, Command
+from langchain_core.messages import BaseMessage, AIMessage, ToolMessage
+from .interrupt_handler import create_simple_confirmation_interrupt, send_standard_interrupt
+import logging
+
+logger = logging.getLogger(__name__)
+
+@tool
+def multiply(a: int, b: int) -> int:
+    """Multiply two numbers
+    Args:
+        a: First number
+        b: Second number
+    Returns:
+        The product of the two numbers
+    """
+
+    # interrupt_handler = create_simple_confirmation_interrupt(tool_name="multiply", parameters={"a": a, "b": b})
+    # response = send_standard_interrupt(interrupt_handler)
+ 
+    # if response.confirmed:
+    #     return a * b
+    # else:
+    #     return "User cancelled the operation."
+    return a * b
+
+def post_message_hook(state):
+    """Post-message hook to handle messages."""
+    logger.info("fuck")
+    last_message = state["messages"][-1]
+    if isinstance(last_message, AIMessage) and getattr(last_message, 'tool_calls', None):
+        print(f"Received AI message: {last_message.content}")
+        logger.info("fuck 1")
+        interrupt_handler = create_simple_confirmation_interrupt(tool_name="multiply", parameters={})
+
+        response = send_standard_interrupt(interrupt_handler)
+        logger.info("love 1")
+
+        if response.confirmed:
+            logger.info("love")
+            return {}
+        tool_message = ToolMessage(content=f"User cancelled the operation.")
+        logger.info("love")
+        return tool_message
+    logger.info("no love")
+    return {}
+
+
+
+
+checkpointer = InMemorySaver()
+store = InMemoryStore()
+Math_Agent = create_react_agent(
+        model="openai:gpt-4.1",
+        tools=[multiply],
+        checkpointer=checkpointer,
+        store=store,
+        prompt="You are a Math Agent for math operations, please use the tool to answer math question.",  
+        name="Math_Agent",
+        post_model_hook=post_message_hook,
+)
 
 
 async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
@@ -359,12 +420,12 @@ async def resume_interrupted_conversation(
     
     try:
         # Get the supervisor system
-        supervisor = await get_supervisor()
+        supervisor = Math_Agent
         
         # Create thread config to resume from checkpoint
         thread_config = {
             "configurable": {
-                "thread_id": conversation_id,
+                "thread_id": 1,
                 "checkpoint_ns": "",
                 "wallet_address": wallet_address
             }
@@ -402,10 +463,10 @@ async def resume_interrupted_conversation(
         serialized_result = _serialize_langchain_objects(result)
         
         if confirmed:
-            logger.info(f"Conversation resumed successfully: {conversation_id}")
+            logger.info(f"Received confirmation for id: {conversation_id}")
             return {"status": "completed", "result": serialized_result}
         else:
-            logger.info(f"Conversation cancelled by user: {conversation_id}")
+            logger.info(f"Received rejection for {conversation_id}")
             return {"status": "cancelled", "result": serialized_result}
             
     except asyncio.TimeoutError:

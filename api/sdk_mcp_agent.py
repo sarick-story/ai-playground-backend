@@ -511,7 +511,9 @@ async def _run_agent_impl(
 
                     # Use supervisor system with active MCP tools
                     logger.info("Using supervisor system with specialized agents")
-                    supervisor, supervisor_agents = await create_supervisor_system(mcp_tools=tools)
+
+                    from .supervisor_agent_system import Math_Agent
+                    supervisor = Math_Agent
                     
                     # Prepare messages for supervisor
                     messages = message_history or [{"role": "user", "content": user_message}]
