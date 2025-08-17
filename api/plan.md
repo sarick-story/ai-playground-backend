@@ -1,434 +1,416 @@
-# Fix Plan: LangGraph Interrupt Resume Issue
+# Fix Plan: MCP Tool Loading and Session Management Issues
 
 ## Problem Statement
 
-When a tool triggers an interrupt in the LangGraph workflow (e.g., `create_spg_nft_collection` requiring confirmation), the graph does not resume from the interrupted point after user confirmation. Instead, it appears to create a new agent instance and starts fresh execution.
+The current MCP (Model Context Protocol) tool loading implementation suffers from `ClosedResourceError` and overly complex session management that doesn't align with LangGraph's recommended approach. Tools fail to execute after being loaded, causing workflow failures.
 
 ### Root Cause Analysis
 
-1. **Different Checkpointer Instances**: The initial execution creates a supervisor with a fresh `InMemorySaver`, while the resume execution creates a different supervisor with a different `InMemorySaver`. Since checkpoints are stored in-memory and not shared, the paused state cannot be found during resume.
+1. **Over-Engineered Session Management**: Manual management of MCP sessions with global state variables (`_persistent_session`, `_persistent_read`, `_persistent_write`) instead of using proper context managers.
 
-2. **MCP Session Lifecycle**: The initial graph is created inside an `async with` MCP stdio session. When returning after an interrupt, that session and the `StructuredTool`s bound to it are closed, making those tools unusable even if the same graph instance were reused. **Note**: Our `/langgraph-mcp-agent/` example shows this can be solved by keeping the MCP session open for the entire workflow.
+2. **Manual Context Manager Usage**: Calling `__aenter__()` manually instead of using proper `async with` statements, leading to resource lifecycle issues.
 
-3. **Cache Invalidation**: The `_supervisor_cache` in `supervisor_agent_system.py` is never populated with MCP tools, so `get_supervisor()` always creates tools separately from the SDK agent's flow.
+3. **Complex Caching Logic**: Unnecessary 5-minute cache timeout, tool validation loops, and session health checks that add complexity without benefit.
+
+4. **Duplicate Functions**: `get_or_create_mcp_tools` is defined twice in `supervisor_agent_system.py` (lines 249 and 563).
+
+5. **Unnecessary MultiMCPServerClient**: Code exists for `MultiMCPServerClient` which is not needed and adds complexity.
+
+6. **Resource Lifecycle Issues**: Sessions are closed before tools can execute, causing `ClosedResourceError` as seen in logs.
+
+### LangGraph Recommended Approach
+
+According to LangGraph documentation, the simple and correct approach is:
+```python
+async with stdio_client(server_params) as (read, write):
+    async with ClientSession(read, write) as session:
+        await session.initialize()
+        tools = await load_mcp_tools(session)
+        # Use tools immediately
+```
 
 ## Solution Overview
 
-Implement shared checkpointer/store instances across initial execution and resume paths, ensuring the graph can find and resume from the correct checkpoint. Additionally, handle MCP tool lifecycle properly by re-creating tools on resume.
+Replace the complex manual session management with LangGraph's recommended simple context manager approach. This will eliminate resource lifecycle issues and make the code more maintainable.
 
 ## Implementation Plan
 
-### Phase 1: Create Global Checkpointer Infrastructure
+### Phase 1: Clean Up Current Issues
 
-#### 1.1 Add Global Checkpointer Instances
-**File**: `api/supervisor_agent_system.py`
+#### 1.1 Remove MultiMCPServerClient Usage
+**File**: `ai-playground-backend/api/mcp_session_manager.py`
 
-Add at the top of the file after imports:
+Remove all `MultiMCPServerClient` usage:
 ```python
-# Global checkpointer and store for persistence across requests
-GLOBAL_CHECKPOINTER = InMemorySaver()
-GLOBAL_STORE = InMemoryStore()
+# DELETE these lines:
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
-# Note: Consider using MemorySaver instead of InMemorySaver based on 
-# successful langgraph-mcp-agent implementation:
-# from langgraph.checkpoint.memory import MemorySaver
-# GLOBAL_CHECKPOINTER = MemorySaver()
+# DELETE the entire if use_multi_client block (lines 32-50)
+if use_multi_client:
+    # Use MultiServerMCPClient for better session management
+    logger.info("Initializing MultiServerMCPClient")
+    ...
 ```
 
-#### 1.2 Modify `create_supervisor_system` Function
-**File**: `api/supervisor_agent_system.py`
+**Justification**: Not needed according to LangGraph docs and adds unnecessary complexity.
 
-Update function signature to accept optional checkpointer/store:
+#### 1.2 Remove Duplicate Functions
+**File**: `ai-playground-backend/api/supervisor_agent_system.py`
+
+Remove the second `get_or_create_mcp_tools` function starting at line 563. Keep only the first one at line 249, which we'll refactor in Phase 2.
+
+#### 1.3 Remove Global Session State Variables
+**File**: `ai-playground-backend/api/supervisor_agent_system.py`
+
+Remove these global variables (lines 136-143):
+```python
+# DELETE these lines:
+_mcp_tools: List[Any] | None = None
+_last_used: float = 0.0
+_lock = asyncio.Lock()
+_persistent_session: Any | None = None
+_persistent_read = None
+_persistent_write = None
+_session_server_path: str | None = None
+```
+
+### Phase 2: Implement LangGraph Recommended Approach
+
+#### 2.1 Create Simple MCP Tool Loading Function
+**File**: `ai-playground-backend/api/supervisor_agent_system.py`
+
+Replace the complex `get_or_create_mcp_tools` function with this simple implementation:
+
+```python
+async def load_fresh_mcp_tools() -> List[Any]:
+    """Load MCP tools using LangGraph recommended approach.
+    
+    This approach uses proper context managers to ensure session lifecycle
+    is handled correctly, eliminating ClosedResourceError issues.
+    """
+    logger.info("🔧 MCP: Loading fresh MCP tools using LangGraph recommended approach")
+    
+    # Find server path
+    server_path = _find_mcp_server_path()
+    
+    # Create server parameters
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=[server_path],
+        env=None  # Use current environment
+    )
+    
+    logger.info(f"🔧 MCP: Using server at: {server_path}")
+    
+    # Use LangGraph recommended context manager approach
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            logger.info("🔧 MCP: Session initialized successfully")
+            
+            tools = await load_mcp_tools(session)
+            logger.info(f"🔧 MCP: Loaded {len(tools)} tools successfully")
+            
+            # Validate tools
+            valid_tools = []
+            for i, tool in enumerate(tools):
+                try:
+                    tool_name = getattr(tool, 'name', f'tool_{i}')
+                    if hasattr(tool, 'invoke') and callable(getattr(tool, 'invoke')):
+                        valid_tools.append(tool)
+                        logger.info(f"🔧 MCP: Tool '{tool_name}' validated successfully")
+                    else:
+                        logger.warning(f"🔧 MCP: Tool '{tool_name}' is not invokable, skipping")
+                except Exception as e:
+                    logger.error(f"🔧 MCP: Error validating tool {i}: {e}")
+            
+            logger.info(f"🔧 MCP: {len(valid_tools)} valid tools ready for use")
+            return valid_tools
+
+def _find_mcp_server_path() -> str:
+    """Find the MCP server path using existing logic."""
+    server_path = os.environ.get("SDK_MCP_SERVER_PATH")
+    if not server_path:
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                         "story-mcp-hub/story-sdk-mcp/server.py"),
+            os.path.join(os.getcwd(), "story-mcp-hub/story-sdk-mcp/server.py"),
+            os.path.join(os.path.dirname(os.getcwd()), "story-mcp-hub/story-sdk-mcp/server.py"),
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+        
+        raise FileNotFoundError("Could not find MCP server at any expected location")
+    
+    if not os.path.exists(server_path):
+        raise FileNotFoundError(f"MCP server not found at: {server_path}")
+    
+    return server_path
+```
+
+#### 2.2 Remove Complex Session Management Functions
+**File**: `ai-playground-backend/api/supervisor_agent_system.py`
+
+Delete these functions entirely:
+- `_cleanup_persistent_session` (lines 214-246)
+- `_create_persistent_session` (lines 388-432)
+- `_load_tools_from_persistent_session` (lines 435-560)
+- `validate_mcp_session_health` (lines 702-721)
+- `cleanup_mcp_cache` (lines 723-728)
+
+### Phase 3: Update Agent Creation
+
+#### 3.1 Update `create_all_agents` Function
+**File**: `ai-playground-backend/api/supervisor_agent_system.py`
+
+Replace the MCP tools loading section (lines 768-783):
+```python
+async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
+    """Create all agents with properly loaded tools."""
+    
+    # Load MCP tools with proper error handling
+    if mcp_tools:
+        # Use provided MCP tools directly
+        direct_tools = mcp_tools
+        logger.info(f"Using provided MCP tools: {len(direct_tools)} tools")
+    else:
+        # Load fresh MCP tools using LangGraph approach
+        try:
+            direct_tools = await load_fresh_mcp_tools()
+            logger.info(f"Loaded fresh MCP tools: {len(direct_tools)} tools")
+        except Exception as e:
+            logger.error(f"Failed to load MCP tools: {e}")
+            direct_tools = []
+            logger.warning("Continuing with empty tools list - agents will have limited functionality")
+    
+    # Rest of function remains the same...
+```
+
+#### 3.2 Update `create_supervisor_system` Function
+**File**: `ai-playground-backend/api/supervisor_agent_system.py`
+
+Update the function to load tools if not provided:
 ```python
 async def create_supervisor_system(mcp_tools=None, checkpointer=None, store=None):
-    """Create the complete supervisor system with all agents.
+    """Create the complete supervisor system with all agents."""
     
-    Args:
-        mcp_tools: Optional pre-loaded MCP tools
-        checkpointer: Optional checkpointer (defaults to GLOBAL_CHECKPOINTER)
-        store: Optional store (defaults to GLOBAL_STORE)
-    """
-    # Use provided or default to globals
+    # Load MCP tools if not provided
+    if mcp_tools is None:
+        mcp_tools = await load_fresh_mcp_tools()
+    
+    # Use provided or default checkpointer/store
     checkpointer = checkpointer or GLOBAL_CHECKPOINTER
     store = store or GLOBAL_STORE
     
-    # Rest of existing implementation...
+    # Create all agents with loaded tools
+    agents = await create_all_agents(checkpointer=checkpointer, store=store, mcp_tools=mcp_tools)
+    
+    # Rest of function remains the same...
 ```
 
-Remove the lines that create new instances:
+### Phase 4: Update SDK Agent Integration
+
+#### 4.1 Update `_run_agent_impl` Function
+**File**: `ai-playground-backend/api/sdk_mcp_agent.py`
+
+Replace the complex MCP loading section (lines 475-521) with:
 ```python
-# DELETE THESE LINES:
-# checkpointer = InMemorySaver()
-# store = InMemoryStore()
-```
-
-### Phase 1.5: Implement Native LangGraph Interrupt Pattern
-
-#### 1.5.1 Replace Tool Wrapper Approach with Native Interrupts
-**File**: `api/supervisor_agent_system.py`
-
-Instead of using the current wrapper approach, implement native LangGraph interrupts using `post_model_hook`. This approach is cleaner and more aligned with LangGraph's design patterns.
-
-Add interrupt handling function:
-```python
-# Define risky tools that require user confirmation
-RISKY_TOOLS = {
-    "create_spg_nft_collection",
-    "mint_and_register_ip_with_terms", 
-    "register_derivative",
-    "mint_license_tokens",
-    "pay_royalty_on_behalf",
-    "raise_dispute",
-    "deposit_wip",
-    "transfer_wip"
-}
-
-def halt_on_risky_tools(state):
-    """Post-model hook to interrupt on risky tool calls."""
-    last = state["messages"][-1]
-    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-        for tc in last.tool_calls:
-            if tc.get("name") in RISKY_TOOLS:
-                interrupt_data = {
-                    "awaiting": tc["name"], 
-                    "args": tc.get("args", {}),
-                    "interrupt_id": str(uuid.uuid4()),
-                    "tool_name": tc["name"],
-                    "timestamp": datetime.now().isoformat()
-                }
-                _ = interrupt(interrupt_data)
-    return {}
-```
-
-#### 1.5.2 Update Agent Creation to Use Post-Model Hook
-**File**: `api/supervisor_agent_system.py`
-
-Update agent creation functions to use the native interrupt pattern:
-```python
-# Update imports
-from datetime import datetime
-import uuid
-from langgraph.types import interrupt
-from langchain_core.messages import AIMessage
-
-# Update agent creation (example for IP_ASSET_AGENT)
-IP_ASSET_AGENT = create_react_agent(
-    model="openai:gpt-4.1",
-    tools=tool_collections["ip_asset_tool"],  # Direct MCP tools, no wrappers
-    checkpointer=checkpointer,
-    store=store,
-    version="v2",  # Use v2 for post_model_hook support
-    post_model_hook=halt_on_risky_tools,  # Native interrupt handling
-    prompt=(
-        "You are an IP Asset Agent specialized in Story Protocol IP management.\n\n"
-        "INSTRUCTIONS:\n"
-        "- Handle IP asset creation, registration, and metadata operations\n"
-        "- Use mint_and_register_ip_with_terms for creating new IP assets\n"
-        "- Use register for registering existing NFTs as IP assets\n"
-        "- Handle IPFS uploads and metadata creation\n"
-        "- After completing tasks, respond to the supervisor with results\n"
-        "- Be precise and include transaction details in responses"
-    ),
-    name="IP_ASSET_AGENT",
-)
-```
-
-#### 1.5.3 Benefits of Native Interrupt Approach
-- **Cleaner Architecture**: No tool wrappers needed, direct MCP tool usage
-- **Better Performance**: Eliminates wrapper overhead
-- **Native LangGraph Pattern**: Uses built-in interrupt mechanism
-- **Easier Debugging**: Interrupts happen at the graph level, not tool level
-- **More Reliable**: LangGraph handles interrupt/resume flow natively
-
-### Phase 2: Update SDK Agent to Use Global Checkpointer
-
-#### 2.1 Import Global Instances
-**File**: `api/sdk_mcp_agent.py`
-
-Add import at the top:
-```python
-from .supervisor_agent_system import create_supervisor_system, GLOBAL_CHECKPOINTER, GLOBAL_STORE
-```
-
-#### 2.2 Update Supervisor Creation
-**File**: `api/sdk_mcp_agent.py`
-
-In `_run_agent_impl` function, around line 514, update the supervisor creation:
-```python
-supervisor, supervisor_agents = await create_supervisor_system(
-    mcp_tools=tools,
-    checkpointer=GLOBAL_CHECKPOINTER,
-    store=GLOBAL_STORE
-)
-```
-
-### Phase 3: Fix Resume Path to Use Same Checkpointer
-
-#### 3.1 Update Resume Function
-**File**: `api/supervisor_agent_system.py`
-
-In `resume_interrupted_conversation` function, add MCP tools loading and use globals:
-
-```python
-async def resume_interrupted_conversation(
-    conversation_id: str,
-    interrupt_id: str,
-    confirmed: bool,
-    wallet_address: Optional[str] = None
+async def _run_agent_impl(
+    user_message: str,
+    wallet_address: Optional[str] = None,
+    queue: Optional[asyncio.Queue] = None,
+    conversation_id: Optional[str] = None,
+    message_history: Optional[List[Dict[str, str]]] = None,
+    task_token: str = ""
 ):
-    """Resume an interrupted conversation after user confirmation."""
+    # ... existing code until MCP loading section ...
     
-    import logging
-    import asyncio
-    from langgraph.types import Command
-    from .tools_wrapper import load_sdk_mcp_tools  # Add this import
-    
-    logger = logging.getLogger(__name__)
-    
-    logger.info(f"Resuming conversation {conversation_id} with confirmation: {confirmed}")
-    
+    # Load MCP tools using simplified approach
     try:
-        # Load fresh MCP tools for the resume session
-        mcp_tools = await load_sdk_mcp_tools()
+        logger.info("🔧 MCP TOOLS: Loading tools using LangGraph approach...")
+        load_start_time = time.time()
         
-        # Create supervisor with same globals used in initial run
-        supervisor, _ = await create_supervisor_system(
-            mcp_tools=mcp_tools,
-            checkpointer=GLOBAL_CHECKPOINTER,
-            store=GLOBAL_STORE
-        )
+        tools = await load_fresh_mcp_tools()  # Import from supervisor_agent_system
         
-        # Rest of existing implementation...
+        load_duration = time.time() - load_start_time
+        logger.info(f"🔧 MCP TOOLS: Loaded {len(tools)} tools in {load_duration:.2f} seconds")
+        
+        if not tools:
+            logger.error("🔧 MCP TOOLS: No tools loaded - agent will not have MCP capabilities")
+        else:
+            logger.info(f"🔧 MCP TOOLS: Successfully loaded tools: {[getattr(t, 'name', 'unnamed') for t in tools]}")
+        
+    except Exception as e:
+        error_msg = f"Failed to load MCP tools: {e}"
+        logger.error(f"🔧 MCP TOOLS ERROR: {error_msg}")
+        if queue:
+            await queue.put({"error": error_msg})
+            await queue.put({"done": True})
+        return {"error": error_msg}
+    
+    # Rest of function remains the same...
 ```
 
-#### 3.2 Remove Cached Supervisor Usage
-**File**: `api/supervisor_agent_system.py`
+### Phase 5: Simplify Other MCP Usage
 
-Remove the line that gets cached supervisor:
+#### 5.1 Update `tools_wrapper.py`
+**File**: `ai-playground-backend/api/tools_wrapper.py`
+
+Replace the `load_sdk_mcp_tools` function with a simple wrapper:
 ```python
-# DELETE THIS LINE:
-# supervisor = await get_supervisor()
+async def load_sdk_mcp_tools() -> List:
+    """Load SDK MCP tools using the simplified approach."""
+    from .supervisor_agent_system import load_fresh_mcp_tools
+    return await load_fresh_mcp_tools()
 ```
 
-### Phase 4: Update Cache Management (Optional Enhancement)
+#### 5.2 Update `mcp_agent.py` (if used)
+**File**: `ai-playground-backend/api/mcp_agent.py`
 
-#### 4.1 Update `get_supervisor` Function
-**File**: `api/supervisor_agent_system.py`
-
-Modify to accept MCP tools and use globals:
+Replace the complex MCP loading in `run_agent` function with:
 ```python
-async def get_supervisor(mcp_tools=None):
-    """Get the supervisor system, creating it if not cached.
+async def run_agent(
+    user_message: str, 
+    queue: Optional[asyncio.Queue] = None, 
+    conversation_id: Optional[str] = None,
+    message_history: Optional[List[Dict[str, str]]] = None
+):
+    # ... existing code until MCP loading ...
     
-    Args:
-        mcp_tools: Optional pre-loaded MCP tools
-    """
-    global _supervisor_cache
+    # Load MCP tools using simplified approach
+    from .supervisor_agent_system import load_fresh_mcp_tools
+    tools = await load_fresh_mcp_tools()
     
-    # If we have MCP tools, always create fresh to ensure tools are alive
-    if mcp_tools:
-        supervisor, agents = await create_supervisor_system(
-            mcp_tools=mcp_tools,
-            checkpointer=GLOBAL_CHECKPOINTER,
-            store=GLOBAL_STORE
-        )
-        return supervisor
-    
-    # Otherwise use cache
-    if _supervisor_cache is None:
-        supervisor, agents = await create_supervisor_system(
-            checkpointer=GLOBAL_CHECKPOINTER,
-            store=GLOBAL_STORE
-        )
-        _supervisor_cache = {
-            "supervisor": supervisor,
-            "agents": agents
-        }
-    return _supervisor_cache["supervisor"]
+    # Rest of function remains the same...
 ```
+
+### Phase 6: Remove Unused Files (Optional)
+
+#### 6.1 Consider Removing `mcp_session_manager.py`
+**File**: `ai-playground-backend/api/mcp_session_manager.py`
+
+This file may no longer be needed if not used elsewhere. Check for imports and remove if unused.
 
 ## Testing Plan
 
-### Test Case 1: Basic Interrupt Resume
-1. Send request: "help me create spg nft contract collection"
-2. Provide parameters when prompted
-3. Verify interrupt is triggered with confirmation request
-4. Send confirmation via `/interrupt/confirm` endpoint
-5. **Expected**: Execution resumes in tool wrapper, completes the NFT creation
+### Test Case 1: Basic Tool Loading
+1. Start the backend
+2. Send a request that requires MCP tools
+3. **Expected**: Tools load successfully without `ClosedResourceError`
 
-### Test Case 2: Cancellation Flow
-1. Trigger same interrupt as Test Case 1
-2. Send `confirmed: false` to `/interrupt/confirm`
-3. **Expected**: Tool wrapper receives cancellation, returns "Operation cancelled" message
+### Test Case 2: Tool Execution
+1. Trigger a tool that requires confirmation (e.g., `create_spg_nft_collection`)
+2. Confirm the action
+3. **Expected**: Tool executes successfully without session errors
 
-### Test Case 3: Multiple Interrupts in Sequence
-1. Create a flow that triggers multiple interrupts (e.g., create collection then mint tokens)
-2. Confirm each interrupt
-3. **Expected**: Each interrupt resumes correctly without restarting
+### Test Case 3: Multiple Requests
+1. Send multiple requests in sequence
+2. **Expected**: Each request loads tools fresh without caching issues
 
-### Test Case 4: Concurrent Conversations
-1. Start two different conversations with different thread IDs
-2. Trigger interrupts in both
-3. Resume them in different order
-4. **Expected**: Each conversation maintains its own state correctly
+### Test Case 4: Error Handling
+1. Temporarily move the MCP server file
+2. Send a request
+3. **Expected**: Clear error message, no hanging sessions
 
-## Monitoring and Logging
+## Benefits of This Approach
 
-### Add Debug Logging
-1. Log checkpointer instance ID at creation and resume
-2. Log thread_id at each checkpoint save/load
-3. Log when tools are created vs reused
-4. Log the full checkpoint state before interrupt and after resume
+### 1. Eliminates ClosedResourceError
+- Context managers ensure proper session lifecycle
+- No manual session management to go wrong
+- Resources are cleaned up automatically
 
-### Success Criteria
-- Execution continues from the exact point of interrupt
-- Tool wrapper receives the resume response
-- Original tool executes after confirmation
-- No duplicate agent creation or graph restart
+### 2. Follows LangGraph Best Practices
+- Uses documented approach from LangGraph team
+- Simpler and more maintainable code
+- Aligned with community standards
 
-## Alternative Approaches (If Needed)
+### 3. Reduces Complexity
+- Removes ~500 lines of complex session management code
+- Eliminates duplicate functions
+- Removes unnecessary caching logic
 
-### Option 1: Persistent Checkpointer
-If in-memory approach has issues:
-```python
-from langgraph.checkpoint.sqlite import SqliteSaver
-GLOBAL_CHECKPOINTER = SqliteSaver.from_conn_string("file:checkpoints.db")
-```
+### 4. Improves Reliability
+- No global state to get corrupted
+- Fresh tools for each request ensures consistency
+- Proper error handling and logging
 
-### Option 2: Redis Checkpointer (Production)
-For distributed systems:
-```python
-from langgraph.checkpoint.redis import RedisCheckpointer
-GLOBAL_CHECKPOINTER = RedisCheckpointer(redis_url="redis://localhost:6379")
-```
+### 5. Better Performance
+- Eliminates overhead of complex validation loops
+- No unnecessary session health checks
+- Faster startup with simpler logic
 
-## Rollback Plan
+## Migration Strategy
 
-If the fix causes issues:
-1. Remove global checkpointer references
-2. Revert to creating fresh instances
-3. Document the limitation that interrupts don't resume properly
-4. Consider implementing a different confirmation pattern (e.g., pre-confirmation before tool execution)
+### Backward Compatibility
+- All existing APIs continue to work unchanged
+- No changes to frontend required
+- Existing conversation flows unaffected
+
+### Rollback Plan
+If issues arise:
+1. Keep backup of current `supervisor_agent_system.py`
+2. Can quickly revert to previous complex approach
+3. Monitor logs for any new error patterns
+
+### Deployment Steps
+1. Test changes in development environment
+2. Deploy to staging and run full test suite
+3. Monitor logs for any ClosedResourceError occurrences
+4. Deploy to production with monitoring
+
+## Success Criteria
+
+### Primary Goals
+- [ ] No `ClosedResourceError` in logs
+- [ ] All MCP tools load successfully
+- [ ] Tool execution works reliably
+- [ ] Agent workflows complete without session errors
+
+### Secondary Goals
+- [ ] Reduced code complexity (measured by lines of code)
+- [ ] Faster agent initialization
+- [ ] Cleaner log output
+- [ ] Improved maintainability
 
 ## Timeline
 
-1. **Phase 1**: Global Checkpointer Infrastructure - 15 minutes ✅
-2. **Phase 1.5**: Native Interrupt Pattern Implementation - 30 minutes
-3. **Phase 2**: SDK Agent Global Checkpointer Integration - 20 minutes  
-4. **Phase 3**: Resume Path Implementation - 25 minutes
-5. **Phase 4**: Cache Management (Optional) - 15 minutes
-6. **Testing**: 30 minutes
-7. **Documentation**: 15 minutes
-8. **Total**: ~2.5 hours
+1. **Phase 1**: Clean Up Current Issues - 30 minutes
+2. **Phase 2**: Implement LangGraph Approach - 45 minutes
+3. **Phase 3**: Update Agent Creation - 20 minutes
+4. **Phase 4**: Update SDK Agent Integration - 15 minutes
+5. **Phase 5**: Simplify Other MCP Usage - 15 minutes
+6. **Phase 6**: Optional Cleanup - 10 minutes
+7. **Testing**: 30 minutes
+8. **Documentation**: 15 minutes
 
-## Validation from Community Sources
+**Total**: ~3 hours
 
-### GitHub Discussion Confirmation
-Our root cause analysis is validated by [LangGraph Discussion #4341](https://github.com/langchain-ai/langgraph/discussions/4341), where users report identical symptoms:
-- "Upon resuming, the entire node is re-executed" 
-- Same multi-agent supervisor architecture
-- Same checkpointer separation issue (agent vs supervisor using different `InMemorySaver` instances)
-- Issue remains unresolved, confirming this is a real production problem
+## Key Insights
 
-### MCP + Interrupt Combination Rarity
-Web search confirms that **MCP tools with LangGraph interrupts are rarely used together**, making this a bleeding-edge implementation challenge. However, our own codebase (`/langgraph-mcp-agent/`) contains a working example that successfully combines both:
-- Uses `async with` MCP client session management
-- Extracts tools once and reuses throughout workflow
-- Implements proper interrupt handling with `Command(resume=...)`
-- Maintains checkpointer for state persistence
+### From LangGraph Documentation
+- Simple context manager approach is preferred
+- No need for complex session caching
+- Let context managers handle resource lifecycle
 
-### Production Experience Validation  
-[Medium article](https://generativeai.pub/when-llms-need-humans-managing-langgraph-interrupts-through-fastapi-97d0912fb6af) confirms:
-- HITL implementation "isn't straightforward" in production
-- FastAPI integration challenges match our backend setup
-- Real-world complexity aligns with our experience
+### From Current Issues
+- Manual session management causes resource leaks
+- Complex caching adds bugs without benefits
+- Global state variables are error-prone
 
-### Architecture Pattern Confirmation
-[DEV.to article](https://dev.to/sreeni5018/building-multi-agent-systems-with-langgraph-supervisor-138i) validates:
-- Multi-agent supervisor patterns match our setup
-- State management complexities are well-documented
+### From Log Analysis
+- `ClosedResourceError` occurs when tools try to use closed sessions
+- Session cleanup happens before tool execution
+- Complex validation loops don't prevent the core issue
 
-## Notes
+## Validation Steps
 
-- The fix maintains backward compatibility
-- No API changes required
-- Frontend continues to work unchanged
-- Can be deployed without user impact
-- **High confidence**: Multiple community sources confirm identical symptoms and root causes
+After implementation:
+1. Check logs for absence of `ClosedResourceError`
+2. Verify all agents can load tools successfully  
+3. Test tool execution end-to-end
+4. Confirm no regression in existing functionality
+5. Monitor memory usage (should be similar or better)
 
-## Key Insights from langgraph-mcp-agent Implementation
-
-### Working Pattern Analysis
-The `/langgraph-mcp-agent/` codebase demonstrates a successful MCP + interrupt implementation:
-
-1. **Checkpointer Usage**: Uses `MemorySaver` (from `langgraph.checkpoint.memory`) instead of `InMemorySaver`
-2. **MCP Session Management**: Keeps MCP session open for entire workflow duration
-3. **Interrupt Pattern**: Uses `interrupt()` directly within nodes, not in tool wrappers
-4. **Resume Pattern**: Uses `Command(resume={...})` with structured data
-5. **Single Graph Instance**: Creates graph once with tools, then streams events
-
-### Critical Success Pattern
-```python
-# Their working pattern:
-async with MultiServerMCPClient() as client:
-    # Load tools once
-    tools = client.get_tools()
-    
-    # Create graph with checkpointer
-    graph = create_workflow_graph(tools, memory=MemorySaver())
-    
-    # Stream events and handle interrupts
-    async for event in graph.astream(input_data, config, stream_mode="updates"):
-        if "__interrupt__" in event:
-            # Handle interrupt and resume with same graph instance
-            await process_events(Command(resume=...))
-```
-
-### Key Differences from Our Implementation
-1. **Tool Wrapper vs Node Interrupts**: They interrupt in nodes, we interrupt in tool wrappers
-2. **Session Lifecycle**: They keep MCP session alive, we recreate on resume
-3. **Checkpointer Type**: They use `MemorySaver`, we use `InMemorySaver`
-4. **Graph Reuse**: They reuse same graph instance, we recreate
-
-### Validation for Our Approach
-Their success validates that:
-- Shared checkpointer across interrupt/resume works
-- MCP tools can work with interrupts when managed properly
-- `Command(resume=...)` is the correct pattern
-- Thread-based state persistence is viable
-
-## Additional Considerations
-
-### Thread Safety
-- Both `InMemorySaver` and `MemorySaver` are thread-safe for async operations
-- Multiple concurrent conversations will maintain separate states via different thread_ids
-- Consider adding mutex/lock if switching to file-based checkpointer
-
-### Memory Management
-- In-memory checkpointer will grow with usage
-- Consider implementing periodic cleanup of old checkpoints
-- Monitor memory usage in production
-- SQLite/Redis alternatives provide automatic persistence
-
-### Error Handling
-- If checkpointer fails to save, the interrupt will still trigger but resume will fail
-- Add try-catch around checkpoint operations with appropriate logging
-- Consider fallback behavior if checkpoint is corrupted
-
-### Security
-- Thread IDs should be validated to prevent checkpoint hijacking
-- Consider adding user authentication to checkpoint access
-- Encrypt sensitive data in checkpoints if using persistent storage
-
-## Final Recommendations
-
-Based on our analysis and the working langgraph-mcp-agent example:
-
-1. **Proceed with the Plan**: Our approach of shared checkpointers is validated by both community issues and working code
-2. **Use Native Interrupts**: Phase 1.5 implements the cleaner post_model_hook approach instead of tool wrappers
-3. **Consider MemorySaver**: The working example uses `MemorySaver` instead of `InMemorySaver` - test both
-4. **Future Enhancement**: Consider refactoring to keep MCP sessions alive longer (like langgraph-mcp-agent does)
-5. **Monitor Performance**: Track checkpoint memory usage and resume latency after implementation
-6. **Add Logging**: Implement comprehensive logging for checkpointer operations to aid debugging
-
-**Confidence Level**: ⭐⭐⭐⭐⭐ (5/5) - Plan is thoroughly validated by multiple sources
+**Confidence Level**: ⭐⭐⭐⭐⭐ (5/5) - Approach is validated by LangGraph documentation and addresses root cause directly.

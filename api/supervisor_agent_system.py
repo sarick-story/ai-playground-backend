@@ -7,9 +7,7 @@ from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from typing import Optional, Tuple, List, Any, Dict
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from langchain_mcp_adapters.tools import load_mcp_tools
+# MCP imports are now done locally in load_fresh_mcp_tools to avoid import issues
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import interrupt
 from datetime import datetime
@@ -26,43 +24,13 @@ from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
 
-# Conversation-specific checkpointers for proper isolation
-_conversation_checkpointers: Dict[str, InMemorySaver] = {}
-_conversation_stores: Dict[str, InMemoryStore] = {}
-
 # Global supervisor system cache
 GLOBAL_SUPERVISOR_SYSTEM = None
 
-def get_conversation_checkpointer(conversation_id: str) -> InMemorySaver:
-    """Get or create a checkpointer for a specific conversation."""
-    if conversation_id not in _conversation_checkpointers:
-        logger.info(f"🔄 Creating new checkpointer for conversation: {conversation_id}")
-        _conversation_checkpointers[conversation_id] = InMemorySaver()
-    else:
-        logger.info(f"🔄 Reusing existing checkpointer for conversation: {conversation_id}")
-    return _conversation_checkpointers[conversation_id]
-
-def get_conversation_store(conversation_id: str) -> InMemoryStore:
-    """Get or create a store for a specific conversation."""
-    if conversation_id not in _conversation_stores:
-        logger.info(f"🔄 Creating new store for conversation: {conversation_id}")
-        _conversation_stores[conversation_id] = InMemoryStore()
-    else:
-        logger.info(f"🔄 Reusing existing store for conversation: {conversation_id}")
-    return _conversation_stores[conversation_id]
-
-def cleanup_conversation_state(conversation_id: str):
-    """Clean up checkpointer and store for a conversation."""
-    if conversation_id in _conversation_checkpointers:
-        logger.info(f"🧹 Cleaning up checkpointer for conversation: {conversation_id}")
-        del _conversation_checkpointers[conversation_id]
-    if conversation_id in _conversation_stores:
-        logger.info(f"🧹 Cleaning up store for conversation: {conversation_id}")
-        del _conversation_stores[conversation_id]
-
-# Legacy global references (DEPRECATED - use conversation-specific ones)
-GLOBAL_CHECKPOINTER = InMemorySaver()  # Keep for backward compatibility
-GLOBAL_STORE = InMemoryStore()  # Keep for backward compatibility
+# Global checkpointer and store for all conversations
+# Conversation isolation is handled through thread_id in config
+GLOBAL_CHECKPOINTER = InMemorySaver()
+GLOBAL_STORE = InMemoryStore()
 
 # Note: Consider using MemorySaver instead of InMemorySaver based on 
 # successful langgraph-mcp-agent implementation:
@@ -146,32 +114,11 @@ def halt_on_risky_tools_math(state: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
-def create_math_agent(conversation_id: str):
-    """Create a Math agent with conversation-specific checkpointer."""
-    checkpointer = get_conversation_checkpointer(conversation_id)
-    store = get_conversation_store(conversation_id)
-    
-    logger.info(f"🔄 Creating Math_agent for conversation: {conversation_id}")
-    logger.info(f"🔄 Math_agent checkpointer type: {type(checkpointer).__name__}")
-    logger.info(f"🔄 Math_agent checkpointer instance ID: {id(checkpointer)}")
-    logger.info(f"🔄 Math_agent store type: {type(store).__name__}")
-    logger.info(f"🔄 Math_agent store instance ID: {id(store)}")
-    
-    agent = create_react_agent(
-        model="openai:gpt-4.1",
-        prompt= ("Please only call one tool at a time. Do not call multiple tools at once."),
-        tools=[multiply],
-        checkpointer=checkpointer,
-        store=store,
-        post_model_hook=halt_on_risky_tools_math,
-        version="v2",
-    )
-    
-    return agent
 
-# Legacy global Math_agent (DEPRECATED - use create_math_agent instead)
+# Global Math_agent instance - REQUIRED for proper interrupt handling
+# Using the same agent instance for both initial calls and resume operations
 Math_agent = create_react_agent(
-    model="openai:gpt-4.1",
+    model="openai:gpt-5-mini",
     tools=[multiply],
     checkpointer=GLOBAL_CHECKPOINTER,
     post_model_hook=halt_on_risky_tools_math,
@@ -181,13 +128,6 @@ Math_agent = create_react_agent(
 
 
 
-
-
-
-# Global variables for MCP tools caching
-_mcp_tools: List[Any] | None = None
-_last_used: float = 0.0
-_lock = asyncio.Lock()
 
 
 
@@ -216,9 +156,16 @@ def halt_on_risky_tools(state: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         for tc in last.tool_calls:
             tool_name = tc.get("name", "")
+            tool_args = tc.get("args", {})
+            
+            # Enhanced debugging for all tool calls
+            logger.info(f"🔧 HOOK: Tool call detected: {tool_name}")
+            logger.info(f"🔧 HOOK: Tool args: {json.dumps(tool_args, indent=2)}")
+            logger.info(f"🔧 HOOK: Tool call ID: {tc.get('id', 'unknown')}")
+            logger.info(f"🔧 HOOK: Is risky tool: {tool_name in RISKY_TOOLS}")
+            
             if tool_name in RISKY_TOOLS:
-                # Get tool arguments
-                tool_args = tc.get("args", {})
+                logger.info(f"🔧 HOOK: RISKY TOOL DETECTED: {tool_name}")
                 
                 # Create standardized interrupt using interrupt_handler
                 interrupt_msg = create_transaction_interrupt(
@@ -229,15 +176,15 @@ def halt_on_risky_tools(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 
                 # Send interrupt with proper format
-                logger.info(f"fuck interrupt")
+                logger.info(f"🔧 HOOK: Sending interrupt for {tool_name}")
                 response = send_standard_interrupt(interrupt_msg)
 
-                logger.info(f"love resume")
+                logger.info(f"🔧 HOOK: Interrupt response received")
 
                 if response:
-                    logger.info(f"confirmed = True")
+                    logger.info(f"🔧 HOOK: Tool {tool_name} confirmed = True")
                     return {}
-                logger.info(f"confirmed = False")
+                logger.info(f"🔧 HOOK: Tool {tool_name} confirmed = False")
                 tool_messages = ToolMessage(
                     content="Cancelled by human. Continue without executing this tool.",
                     tool_call_id=tc["id"],
@@ -245,101 +192,141 @@ def halt_on_risky_tools(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 
                 return {"messages": [tool_messages]}
+            else:
+                logger.info(f"🔧 HOOK: Non-risky tool {tool_name}, allowing execution")
     
     return {}
 
 
+
+
+
+async def load_fresh_mcp_tools() -> List[Any]:
+    """Load MCP tools following the EXACT LangGraph documentation pattern."""
+    # Follow exact pattern from LangGraph documentation
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from langchain_mcp_adapters.tools import load_mcp_tools
+    
+    logger.info("🔧 MCP: Following exact LangGraph documentation pattern")
+    
+    # Find server path
+    server_path = _find_mcp_server_path()
+    logger.info(f"🔧 MCP: Using server at: {server_path}")
+    
+    # Load environment variables
+    server_dir = os.path.dirname(server_path)
+    env_path = os.path.join(server_dir, '.env')
+    env_vars = os.environ.copy()
+    
+    if os.path.exists(env_path):
+        logger.info(f"🔧 MCP: Loading environment from {env_path}")
+        with open(env_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    value = value.strip('"').strip("'")
+                    if '#' in value:
+                        value = value.split('#')[0].strip()
+                    env_vars[key] = value
+                    logger.info(f"🔧 MCP: Set {key}={value[:20]}...")
+    
+    # Create server parameters exactly like the documentation
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=[server_path],
+        env=env_vars
+    )
+    
+    # Follow EXACT async context manager pattern from documentation
+    logger.info("🔧 MCP: Using exact async with pattern from documentation")
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            # Initialize the connection
+            logger.info("🔧 MCP: Initializing connection...")
+            await session.initialize()
+            
+            # Get tools
+            logger.info("🔧 MCP: Loading tools...")
+            tools = await load_mcp_tools(session)
+            logger.info(f"🔧 MCP: Successfully loaded {len(tools)} tools using exact documentation pattern")
+            
+            # Log individual tool names if available
+            if tools:
+                tool_names = [getattr(tool, 'name', str(tool)) for tool in tools[:5]]  # First 5 tools
+                logger.info(f"🔧 MCP: Tool names (first 5): {tool_names}")
+            else:
+                logger.warning("🔧 MCP: No tools loaded using documentation pattern")
+                
+            return tools
+
+async def cleanup_global_mcp_client():
+    """No cleanup needed with fresh MCP tools pattern."""
+    logger.info("🔧 MCP: No cleanup needed - using fresh tools each time")
+    pass
+
+
+def _find_mcp_server_path() -> str:
+    """Find the MCP server path using existing logic."""
+    server_path = os.environ.get("SDK_MCP_SERVER_PATH")
+    if not server_path:
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                         "story-mcp-hub/story-sdk-mcp/server.py"),
+            os.path.join(os.getcwd(), "story-mcp-hub/story-sdk-mcp/server.py"),
+            os.path.join(os.path.dirname(os.getcwd()), "story-mcp-hub/story-sdk-mcp/server.py"),
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+        
+        raise FileNotFoundError("Could not find MCP server at any expected location")
+    
+    if not os.path.exists(server_path):
+        raise FileNotFoundError(f"MCP server not found at: {server_path}")
+    
+    return server_path
+
+
+# Legacy function name for backward compatibility
 async def get_or_create_mcp_tools() -> List[Any]:
-    """Get or create MCP tools using proper MCP client library with caching.
+    """Legacy function name - redirects to load_fresh_mcp_tools for backward compatibility."""
+    return await load_fresh_mcp_tools()
+
+
+
+
+async def test_mcp_tool_direct(tool_name: str, tool_args: dict) -> dict:
+    """Test an MCP tool directly for debugging purposes."""
+    logger.info(f"🔧 DIRECT TEST: Testing tool {tool_name} with args: {tool_args}")
     
-    Returns cached tools if available, otherwise loads fresh tools from MCP server.
-    """
-    global _mcp_tools, _last_used
-    
-    async with _lock:
-        current_time = time.time()
+    try:
+        tools = await get_or_create_mcp_tools()
+        target_tool = None
         
-        # Reuse existing tools if they were loaded recently (within 5 minutes)
-        if _mcp_tools is not None and current_time - _last_used < 300:
-            logger.info("Reusing existing MCP tools")
-            _last_used = current_time
-            return _mcp_tools
-            
-        # Find the server path
-        server_path = os.environ.get("SDK_MCP_SERVER_PATH")
-        if not server_path:
-            # Try multiple possible locations for server.py
-            possible_paths = [
-                # Relative path from parent directory
-                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                             "story-mcp-hub/story-sdk-mcp/server.py"),
-                # Direct path based on workspace structure
-                "/Users/sarickshah/Documents/story/story-mcp-hub/story-sdk-mcp/server.py",
-                # Current directory
-                os.path.join(os.getcwd(), "story-mcp-hub/story-sdk-mcp/server.py"),
-                # One level up
-                os.path.join(os.path.dirname(os.getcwd()), "story-mcp-hub/story-sdk-mcp/server.py"),
-            ]
-            
-            # Try each path
-            for path in possible_paths:
-                logger.info(f"Checking for server.py at: {path}")
-                if os.path.exists(path):
-                    server_path = path
-                    logger.info(f"Found server.py at: {server_path}")
-                    break
-            
-            if not server_path:
-                error_msg = "Could not find server.py in any of the expected locations"
-                logger.error(error_msg)
-                raise FileNotFoundError(error_msg)
+        for tool in tools:
+            if getattr(tool, 'name', '') == tool_name:
+                target_tool = tool
+                break
         
-        logger.info(f"SDK MCP Server path: {server_path}")
+        if not target_tool:
+            logger.error(f"🔧 DIRECT TEST: Tool {tool_name} not found in available tools")
+            return {"error": f"Tool {tool_name} not found"}
         
-        if not os.path.exists(server_path):
-            error_msg = f"SDK MCP server file not found at {server_path}"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
+        logger.info(f"🔧 DIRECT TEST: Found tool {tool_name}, attempting invoke...")
         
-        # Clear existing cached data to load fresh tools
-        if _mcp_tools is not None:
-            logger.info("Clearing cached MCP tools to load fresh ones")
-            _mcp_tools = None
+        # Try to invoke the tool directly
+        result = await target_tool.ainvoke(tool_args)
+        logger.info(f"🔧 DIRECT TEST: Tool {tool_name} succeeded: {result}")
+        return {"success": result}
         
-        try:
-            logger.info(f"Creating MCP session with server: {server_path}")
-            
-            # Use standard MCP approach with stdio_client (same as tools_wrapper.py)
-            server_params = StdioServerParameters(
-                command=sys.executable,
-                args=[server_path]
-            )
-            
-            # Use stdio_client context manager to handle session lifecycle properly
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    logger.info("MCP session initialized successfully")
-                    
-                    # Load tools using langchain_mcp_adapters (no custom wrapper needed)
-                    tools = await load_mcp_tools(session)
-                    logger.info(f"Loaded {len(tools)} tools from MCP server")
-                    
-                    # Store tools for reuse (sessions are context-managed)
-                    _mcp_tools = tools
-                    _last_used = time.time()
-                    
-                    return tools
-            
-        except Exception as e:
-            error_msg = f"Error creating MCP session: {str(e)}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
-            
-            # Clean up cached data
-            _mcp_tools = None
-            
-            raise RuntimeError(f"Failed to create MCP session: {str(e)}")
+    except Exception as e:
+        logger.error(f"🔧 DIRECT TEST: Tool {tool_name} failed: {e}")
+        import traceback
+        logger.error(f"🔧 DIRECT TEST: Full traceback: {traceback.format_exc()}")
+        return {"error": str(e)}
 
 async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     """Create all agents with properly loaded tools.
@@ -349,14 +336,20 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         store: Optional store for cross-thread memory
         mcp_tools: Optional pre-loaded MCP tools to use instead of loading separately
     """
-    # For Phase 1.5: Use direct MCP tools instead of wrapped tool collections
-    # This enables native interrupt handling via post_model_hook
+    # Load MCP tools with proper error handling
     if mcp_tools:
         # Use provided MCP tools directly - no wrapper needed
         direct_tools = mcp_tools
+        logger.info(f"Using provided MCP tools: {len(direct_tools)} tools")
     else:
-        # Load MCP tools directly using the caching method
-        direct_tools = await get_or_create_mcp_tools()
+        # Load fresh MCP tools using LangGraph approach
+        try:
+            direct_tools = await load_fresh_mcp_tools()
+            logger.info(f"Loaded fresh MCP tools: {len(direct_tools)} tools")
+        except Exception as e:
+            logger.error(f"Failed to load MCP tools: {e}")
+            direct_tools = []
+            logger.warning("Continuing with empty tools list - agents will have limited functionality")
     
     # Create tool collections using direct tools (maintain categorization for now)
     tool_collections = {
@@ -370,6 +363,14 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         "royalty_tool": direct_tools,
         "wip_tool": direct_tools
     }
+    
+    # Debug log the tool assignment
+    logger.info(f"🔧 AGENT TOOLS: Assigning {len(direct_tools)} tools to each agent")
+    if direct_tools:
+        sample_tool = direct_tools[0]
+        logger.info(f"🔧 SAMPLE TOOL: {getattr(sample_tool, 'name', 'unknown')} - {type(sample_tool)}")
+    else:
+        logger.warning("🔧 AGENT TOOLS: No tools available for agents!")
     
     # Create IP Asset Agent
     IP_ASSET_AGENT = create_react_agent(
@@ -433,7 +434,18 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
         name="IP_LICENSE_AGENT",
     )
 
-    # Create NFT Client Agent
+    # Create NFT Client Agent with enhanced debugging
+    logger.info(f"🔧 CREATING NFT_CLIENT_AGENT with {len(tool_collections['nft_client_tool'])} tools")
+    
+    # Log specific tools available to NFT Client Agent
+    nft_tools = tool_collections["nft_client_tool"]
+    nft_tool_names = [getattr(tool, 'name', 'unnamed') for tool in nft_tools if hasattr(tool, 'name')]
+    logger.info(f"🔧 NFT_CLIENT_AGENT TOOLS: {nft_tool_names}")
+    
+    # Check for create_spg_nft_collection tool specifically
+    has_spg_tool = any(getattr(tool, 'name', '') == 'create_spg_nft_collection' for tool in nft_tools)
+    logger.info(f"🔧 NFT_CLIENT_AGENT HAS create_spg_nft_collection: {has_spg_tool}")
+    
     NFT_CLIENT_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["nft_client_tool"],
@@ -448,10 +460,13 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
             "- Check SPG contract minting fees and tokens\n"
             "- Configure collection parameters (mint fees, tokens, settings)\n"
             "- After completing tasks, respond to the supervisor with results\n"
-            "- Include collection addresses and fee information"
+            "- Include collection addresses and fee information\n"
+            "- If a tool fails, provide detailed error information to help with debugging"
         ),
         name="NFT_CLIENT_AGENT",
     )
+    
+    logger.info(f"🔧 NFT_CLIENT_AGENT CREATED SUCCESSFULLY")
 
     # Create Dispute Agent
     DISPUTE_AGENT = create_react_agent(
@@ -570,7 +585,11 @@ async def create_supervisor_system(mcp_tools=None, checkpointer=None, store=None
         checkpointer: Optional checkpointer (defaults to GLOBAL_CHECKPOINTER)
         store: Optional store (defaults to GLOBAL_STORE)
     """
-    # Use provided or default to globals
+    # Load MCP tools if not provided
+    if mcp_tools is None:
+        mcp_tools = await load_fresh_mcp_tools()
+    
+    # Use provided or default checkpointer/store
     checkpointer = checkpointer or GLOBAL_CHECKPOINTER
     store = store or GLOBAL_STORE
     
@@ -720,11 +739,12 @@ async def resume_interrupted_conversation(
     logger.info(f"🔍 RESUME: Starting resume for conversation {conversation_id} with confirmation: {confirmed}")
     
     try:
-        # Get the supervisor system with conversation-specific checkpointer
-        supervisor = create_math_agent(conversation_id)
+        # Use the SAME supervisor instance that was interrupted
+        # Creating a new supervisor would lose the interrupted state!
+        supervisor = await get_supervisor_or_create_supervisor()
         
         # Log supervisor details
-        logger.info(f"🔍 RESUME: Using Math_agent supervisor")
+        logger.info(f"🔍 RESUME: Using existing supervisor system instance for resume")
         logger.info(f"🔍 RESUME: Checkpointer type: {type(supervisor.checkpointer).__name__}")
         logger.info(f"🔍 RESUME: Checkpointer instance ID: {id(supervisor.checkpointer)}")
         logger.info(f"🔍 RESUME: Store type: {type(supervisor.store).__name__}")

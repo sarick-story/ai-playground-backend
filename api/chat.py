@@ -108,9 +108,10 @@ async def stream_agent_response(
             formatted_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
             
             # Choose the appropriate agent based on mcp_type
+            result = None
             if mcp_type == "sdk":
                 logger.info(f"Using SDK MCP agent with wallet: {wallet_address}")
-                await run_sdk_agent(
+                result = await run_sdk_agent(
                     last_message, 
                     wallet_address=wallet_address,
                     queue=queue, 
@@ -120,12 +121,23 @@ async def stream_agent_response(
             else:
                 # Default to blockscout/storyscan agent
                 logger.info("Using Storyscan MCP agent")
-                await run_blockscout_agent(
+                result = await run_blockscout_agent(
                     last_message, 
                     queue=queue, 
                     conversation_id=conversation_id, 
                     message_history=formatted_messages
                 )
+            
+            # Handle interrupt responses properly
+            if isinstance(result, dict) and result.get("status") == "interrupted":
+                logger.info(f"Agent returned interrupt status: {result.get('interrupt_data', {}).get('interrupt_id', 'unknown')}")
+                # Send interrupt information to frontend
+                interrupt_info = result.get("interrupt_data", {})
+                interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
+                await queue.put(interrupt_message)
+                # Don't send done=True - wait for frontend confirmation
+                return
+                
         except Exception as e:
             logger.error(f"Error in run_agent_task: {str(e)}")
             await queue.put({"error": str(e)})
@@ -257,6 +269,9 @@ async def handle_transaction(request: TransactionRequest):
 # Track ongoing interrupt confirmations to prevent duplicates
 _active_confirmations = set()
 
+# Import test function for debugging
+from .supervisor_agent_system import test_mcp_tool_direct
+
 @app.post("/interrupt/confirm")
 async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
     """Handle interrupt confirmation from frontend and resume execution."""
@@ -323,4 +338,20 @@ async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
     finally:
         # Always remove from active set
         _active_confirmations.discard(confirmation_key)
+
+@app.post("/test/mcp-tool")
+async def test_mcp_tool(tool_name: str, tool_args: dict = {}):
+    """Test an MCP tool directly for debugging purposes."""
+    logger.info(f"🔧 TEST ENDPOINT: Testing {tool_name} with args: {tool_args}")
+    
+    try:
+        result = await test_mcp_tool_direct(tool_name, tool_args)
+        return JSONResponse(content={
+            "tool_name": tool_name,
+            "args": tool_args,
+            "result": result
+        })
+    except Exception as e:
+        logger.error(f"🔧 TEST ENDPOINT: Error testing tool {tool_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 

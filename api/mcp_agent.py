@@ -197,49 +197,41 @@ async def run_agent(
     )
 
     try:
-        logger.info("Initializing stdio client")
-        async with stdio_client(server_params) as (read, write):
-            logger.info("Stdio client initialized, creating session")
-            async with ClientSession(read, write) as session:
-                # Initialize the connection
-                logger.info("Initializing MCP session")
-                await session.initialize()
-                logger.info("MCP session initialized successfully")
+        # Load MCP tools using centralized approach
+        from .supervisor_agent_system import load_fresh_mcp_tools
+        logger.info("Loading MCP tools")
+        tools = await load_fresh_mcp_tools()
+        logger.info(f"Loaded {len(tools)} MCP tools")
+        
+        # Log tool names for debugging
+        tool_names = [tool.name for tool in tools]
+        logger.info(f"Available tools: {', '.join(tool_names)}")
 
-                # Get tools
-                logger.info("Loading MCP tools")
-                tools = await load_mcp_tools(session)
-                logger.info(f"Loaded {len(tools)} MCP tools")
-                
-                # Log tool names for debugging
-                tool_names = [tool.name for tool in tools]
-                logger.info(f"Available tools: {', '.join(tool_names)}")
+        # Create memory tools with proper namespace
+        memory_tools = [
+            create_manage_memory_tool(
+                namespace=("memories", conversation_id or "default"),
+                store=store
+            ),
+            create_search_memory_tool(
+                namespace=("memories", conversation_id or "default"),
+                store=store
+            )
+        ]
 
-                # Create memory tools with proper namespace
-                memory_tools = [
-                    create_manage_memory_tool(
-                        namespace=("memories", conversation_id or "default"),
-                        store=store
-                    ),
-                    create_search_memory_tool(
-                        namespace=("memories", conversation_id or "default"),
-                        store=store
-                    )
-                ]
+        all_tools = tools + memory_tools
 
-                all_tools = tools + memory_tools
+        # Create agent with tools and message history
+        agent = create_react_agent(
+            model,
+            all_tools,
+            state_modifier=system_prompt
+        )
 
-                # Create agent with tools and message history
-                agent = create_react_agent(
-                    model,
-                    all_tools,
-                    state_modifier=system_prompt
-                )
-
-                # Prepare messages for agent
-                messages = message_history or [{"role": "user", "content": user_message}]
-                
-                if queue:
+        # Prepare messages for agent
+        messages = message_history or [{"role": "user", "content": user_message}]
+        
+        if queue:
                     # Streaming callback handler definition remains the same
                     class StreamingCallbackHandler(BaseCallbackHandler):
                         run_inline = True
@@ -330,12 +322,12 @@ async def run_agent(
                     await queue.put({"done": True})
                     return result
                 
-                else:
-                    # Run without streaming
-                    logger.info("Starting agent without streaming")
-                    result = await agent.ainvoke({"messages": messages})
-                    logger.info("Agent completed execution without streaming")
-                    return result
+        else:
+            # Run without streaming
+            logger.info("Starting agent without streaming")
+            result = await agent.ainvoke({"messages": messages})
+            logger.info("Agent completed execution without streaming")
+            return result
 
     except Exception as e:
         logger.error(f"Error in agent execution: {str(e)}")

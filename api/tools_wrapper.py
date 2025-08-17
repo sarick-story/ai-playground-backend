@@ -19,33 +19,10 @@ from .interrupt_handler import create_simple_confirmation_interrupt, create_tran
 
 
 
-async def load_sdk_mcp_tools() -> List:  # returns a list of tool callables compatible with LangChain/LangGraph
-    """Load SDK MCP tools via stdio MCP session (same pattern as sdk_mcp_agent.py).
-
-    Resolution order for server path:
-    - SDK_MCP_SERVER_PATH env var, if set
-    - Default relative path: ../../story-mcp-hub/story-sdk-mcp/server.py
-    """
-    server_path = os.environ.get("SDK_MCP_SERVER_PATH")
-    if not server_path:
-        # Resolve relative to this file: <repo>/ai-playground-backend/api/.. /.. /story-mcp-hub/story-sdk-mcp/server.py
-        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        candidate = os.path.join(repo_root, "story-mcp-hub", "story-sdk-mcp", "server.py")
-        if os.path.exists(candidate):
-            server_path = candidate
-        else:
-            raise FileNotFoundError("Could not find story-sdk-mcp server.py. Set SDK_MCP_SERVER_PATH to override.")
-
-    server_params = StdioServerParameters(
-        command="python3",
-        args=[server_path],
-    )
-
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await load_mcp_tools(session)
-            return tools
+async def load_sdk_mcp_tools() -> List:
+    """Load SDK MCP tools using the simplified approach."""
+    from .supervisor_agent_system import load_fresh_mcp_tools
+    return await load_fresh_mcp_tools()
 
 # Tools will be loaded and organized by name when needed
 _tools_cache = None
