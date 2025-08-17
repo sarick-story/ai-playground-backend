@@ -1,10 +1,8 @@
 # Create server parameters for stdio connection
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client, get_default_environment
-from langchain_mcp_adapters.tools import load_mcp_tools # type: ignore
+# MCP imports removed - now using centralized get_or_create_mcp_tools()
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
-from .supervisor_agent_system import get_supervisor, create_supervisor_system
+from .supervisor_agent_system import get_supervisor_or_create_supervisor, create_supervisor_system, get_or_create_mcp_tools
 import os
 import asyncio
 import asyncio.subprocess  # Import at the module level to avoid local variable issue
@@ -473,170 +471,162 @@ async def _run_agent_impl(
                 await queue.put({"done": True})
             return {"error": error_msg}
         
-        # Create fresh MCP session each time to avoid connection issues
+        # Load MCP tools using centralized caching method
         try:
-            logger.info("Creating fresh MCP session")
-            # Find the server path
-            server_path = os.environ.get("SDK_MCP_SERVER_PATH")
-            if not server_path:
-                # Try multiple possible locations for server.py
-                repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-                candidate = os.path.join(repo_root, "story-mcp-hub", "story-sdk-mcp", "server.py")
-                if os.path.exists(candidate):
-                    server_path = candidate
-                else:
-                    raise FileNotFoundError("Could not find story-sdk-mcp server.py. Set SDK_MCP_SERVER_PATH to override.")
+            logger.info("Loading MCP tools with caching")
+            tools = await get_or_create_mcp_tools()
+            logger.info(f"Loaded {len(tools)} MCP tools")
             
-            logger.info(f"SDK MCP Server path: {server_path}")
+            # Log wallet address if provided
+            if wallet_address:
+                logger.info(f"Using wallet address: {wallet_address}")
+
+            # Use supervisor system with loaded MCP tools
+            logger.info("Using supervisor system with specialized agents")
+            #supervisor = await get_supervisor_or_create_supervisor()
+            from .supervisor_agent_system import create_math_agent
+            supervisor = create_math_agent(conversation_id)
             
-            if not os.path.exists(server_path):
-                raise FileNotFoundError(f"SDK MCP server file not found at {server_path}")
+            # Log checkpointer details for comparison with resume
+            logger.info(f"🔍 INITIAL: Math_agent checkpointer type: {type(supervisor.checkpointer).__name__}")
+            logger.info(f"🔍 INITIAL: Math_agent checkpointer instance ID: {id(supervisor.checkpointer)}")
+            logger.info(f"🔍 INITIAL: Math_agent store type: {type(supervisor.store).__name__}")
+            logger.info(f"🔍 INITIAL: Math_agent store instance ID: {id(supervisor.store)}")
             
-            server_params = StdioServerParameters(
-                command="python3",
-                args=[server_path],
-            )
-            
-            # Use fresh session within proper async context
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    tools = await load_mcp_tools(session)
-                    logger.info(f"Loaded {len(tools)} MCP tools in fresh session")
+            # Prepare messages for supervisor
+            messages = message_history or [{"role": "user", "content": user_message}]
+            logger.info(f"Prepared {len(messages)} messages for the supervisor")
+
+            if queue:
+                # Define the streaming handler directly before using it
+                class StreamingCallbackHandler(BaseCallbackHandler):
+                    run_inline = True
                     
-                    # Now run supervisor within the MCP session context
-                    # Log wallet address if provided
-                    if wallet_address:
-                        logger.info(f"Using wallet address: {wallet_address}")
-
-                    # Use supervisor system with active MCP tools
-                    logger.info("Using supervisor system with specialized agents")
-                    supervisor, supervisor_agents = await create_supervisor_system(mcp_tools=tools)
+                    async def on_llm_new_token(self, token: str, **kwargs):
+                        try:
+                            logger.debug(f"LLM token: {token}")
+                            
+                            # Skip empty tokens
+                            if not token:
+                                return
+                            
+                            # Handle newlines properly - don't escape them
+                            # Just ensure the token is safe for streaming
+                            safe_token = token
+                            
+                            # Only filter out problematic control characters, keep newlines
+                            safe_token = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', safe_token)
+                            
+                            # Send the token as-is (with proper newlines)
+                            await queue.put(safe_token)
+                        except Exception as e:
+                            logger.warning(f"Error processing token, skipping: {str(e)}")
+                            # If there's an error, just skip this token
+                            pass
                     
-                    # Prepare messages for supervisor
-                    messages = message_history or [{"role": "user", "content": user_message}]
-                    logger.info(f"Prepared {len(messages)} messages for the supervisor")
-
-                    if queue:
-                        # Define the streaming handler directly before using it
-                        class StreamingCallbackHandler(BaseCallbackHandler):
-                            run_inline = True
+                    async def on_chain_error(self, error, **kwargs):
+                        """Handle chain errors (but not interrupts - those are handled via stream mode)."""
+                        try:
+                            # Import Command to check instance
+                            from langgraph.types import Command
                             
-                            async def on_llm_new_token(self, token: str, **kwargs):
-                                try:
-                                    logger.debug(f"LLM token: {token}")
-                                    
-                                    # Skip empty tokens
-                                    if not token:
-                                        return
-                                    
-                                    # Handle newlines properly - don't escape them
-                                    # Just ensure the token is safe for streaming
-                                    safe_token = token
-                                    
-                                    # Only filter out problematic control characters, keep newlines
-                                    safe_token = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', safe_token)
-                                    
-                                    # Send the token as-is (with proper newlines)
-                                    await queue.put(safe_token)
-                                except Exception as e:
-                                    logger.warning(f"Error processing token, skipping: {str(e)}")
-                                    # If there's an error, just skip this token
-                                    pass
+                            # Check if this is a LangGraph Command (normal flow control, not an error)
+                            if isinstance(error, Command) or 'Command' in str(type(error)):
+                                logger.debug(f"LangGraph Command detected (normal flow control): {type(error).__name__}")
+                                return  # Commands are normal flow control, not errors
                             
-                            async def on_chain_error(self, error, **kwargs):
-                                """Handle chain errors (but not interrupts - those are handled via stream mode)."""
-                                try:
-                                    # Import Command to check instance
-                                    from langgraph.types import Command
-                                    
-                                    # Check if this is a LangGraph Command (normal flow control, not an error)
-                                    if isinstance(error, Command) or 'Command' in str(type(error)):
-                                        logger.debug(f"LangGraph Command detected (normal flow control): {type(error).__name__}")
-                                        return  # Commands are normal flow control, not errors
-                                    
-                                    # Check if this is an interrupt - let stream mode handle it, don't treat as error
-                                    if hasattr(error, '__class__') and 'interrupt' in str(error.__class__).lower():
-                                        logger.debug(f"Interrupt detected in callback - will be handled by stream mode: {error}")
-                                        return  # Let astream handle interrupts naturally
-                                    
-                                    # Handle genuine errors (not interrupts)
-                                    error_msg = f"\nError: {str(error)}\n"
-                                    logger.error(f"Chain error: {error}")
-                                    await queue.put(error_msg)
-                                    
-                                except Exception as e:
-                                    logger.error(f"Error handling chain error: {e}")
-                                    await queue.put(f"\nUnexpected error occurred\n")
+                            # Check if this is an interrupt - let stream mode handle it, don't treat as error
+                            if hasattr(error, '__class__') and 'interrupt' in str(error.__class__).lower():
+                                logger.debug(f"Interrupt detected in callback - will be handled by stream mode: {error}")
+                                return  # Let astream handle interrupts naturally
                             
-                            async def on_tool_start(self, serialized, input_dict, **kwargs):
-                                tool_call_id = str(kwargs.get("run_id", uuid.uuid4()))  # Convert UUID to string
-                                tool_name = serialized.get("name", "unknown_tool") 
-                                tool_description = serialized.get("description", "No description available")
-                                
-                                logger.info(f"Starting tool: {serialized} with input: {input_dict}")
-
-                                # Send tool call info to frontend using special format
-                                tool_call = {
-                                    "tool_call": {
-                                        "id": tool_call_id,
-                                        "name": {
-                                            "name": tool_name,
-                                            "description": tool_description
-                                        },
-                                        "args": json.dumps(input_dict)
-                                    }
-                                }
-                                # Don't send internal tool calls to user - they're for frontend processing only
-                                # await queue.put(f"__INTERNAL_TOOL_CALL__{json.dumps(tool_call)}__END_INTERNAL__")
+                            # Handle genuine errors (not interrupts)
+                            error_msg = f"\nError: {str(error)}\n"
+                            logger.error(f"Chain error: {error}")
+                            await queue.put(error_msg)
                             
-                            async def on_tool_end(self, output: str, **kwargs):
-                                tool_call_id = str(kwargs.get("run_id", uuid.uuid4()))  # Convert UUID to string
-                                tool_name = kwargs.get("name", "unknown_tool")
-                                tool_input = kwargs.get("input", {})
-                                
-                                logger.info(f"Tool completed: {tool_name}")
-                                logger.debug(f"Tool output: {output}")
-                                
-                                output_str = (output.content if hasattr(output, "content")
-                                            else str(output) if hasattr(output, "__str__")
-                                            else "Tool execution completed")
-                                
-                                # Send tool result info to frontend using special format
-                                tool_result = {
-                                    "tool_result": {
-                                        "id": tool_call_id,
-                                        "name": tool_name,
-                                        "args": tool_input,
-                                        "result": output_str
-                                    }
-                                }
-
-                                # Don't send internal tool results to user - they're for frontend processing only
-                                # await queue.put(f"__INTERNAL_TOOL_RESULT__{json.dumps(tool_result)}__END_INTERNAL__")
+                        except Exception as e:
+                            logger.error(f"Error handling chain error: {e}")
+                            await queue.put(f"\nUnexpected error occurred\n")
+                    
+                    async def on_tool_start(self, serialized, input_dict, **kwargs):
+                        tool_call_id = str(kwargs.get("run_id", uuid.uuid4()))  # Convert UUID to string
+                        tool_name = serialized.get("name", "unknown_tool") 
+                        tool_description = serialized.get("description", "No description available")
                         
-                        callbacks = [StreamingCallbackHandler()]
-                        
-                        # Run supervisor with streaming
-                        logger.info(f"Starting supervisor system with streaming in task context: {task_token}")
-                        
-                        # Create thread config for persistence
-                        thread_config = {
-                            "configurable": {
-                                "thread_id": conversation_id or str(uuid.uuid4()),
-                                "checkpoint_ns": "",
-                                "wallet_address": wallet_address  # Pass wallet to tools
-                            },
-                            "callbacks": callbacks
+                        logger.info(f"Starting tool: {serialized} with input: {input_dict}")
+
+                        # Send tool call info to frontend using special format
+                        tool_call = {
+                            "tool_call": {
+                                "id": tool_call_id,
+                                "name": {
+                                    "name": tool_name,
+                                    "description": tool_description
+                                },
+                                "args": json.dumps(input_dict)
+                            }
                         }
+                        # Don't send internal tool calls to user - they're for frontend processing only
+                        # await queue.put(f"__INTERNAL_TOOL_CALL__{json.dumps(tool_call)}__END_INTERNAL__")
+                    
+                    async def on_tool_end(self, output: str, **kwargs):
+                        tool_call_id = str(kwargs.get("run_id", uuid.uuid4()))  # Convert UUID to string
+                        tool_name = kwargs.get("name", "unknown_tool")
+                        tool_input = kwargs.get("input", {})
                         
-                        # Use astream with proper stream mode to handle interrupts
-                        final_result = None
-                        async for chunk in supervisor.astream(
-                            {"messages": messages},
-                            config=thread_config,
-                            stream_mode=["values", "updates"]
-                        ):
+                        logger.info(f"Tool completed: {tool_name}")
+                        logger.debug(f"Tool output: {output}")
+                        
+                        output_str = (output.content if hasattr(output, "content")
+                                    else str(output) if hasattr(output, "__str__")
+                                    else "Tool execution completed")
+                        
+                        # Send tool result info to frontend using special format
+                        tool_result = {
+                            "tool_result": {
+                                "id": tool_call_id,
+                                "name": tool_name,
+                                "args": tool_input,
+                                "result": output_str
+                            }
+                        }
+
+                        # Don't send internal tool results to user - they're for frontend processing only
+                        # await queue.put(f"__INTERNAL_TOOL_RESULT__{json.dumps(tool_result)}__END_INTERNAL__")
+                
+                callbacks = [StreamingCallbackHandler()]
+                
+                # Run supervisor with streaming
+                logger.info(f"Starting supervisor system with streaming in task context: {task_token}")
+                
+                # Create thread config for persistence
+                thread_id = conversation_id or str(uuid.uuid4())
+                thread_config = {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "wallet_address": wallet_address  # Pass wallet to tools
+                    },
+                    "callbacks": callbacks
+                }
+                
+                logger.info(f"🔍 INITIAL: Using thread_id: {thread_id}")
+                logger.info(f"🔍 INITIAL: Thread config: {thread_config}")
+                
+                # Check initial state before execution
+                try:
+                    initial_state = await supervisor.aget_state(thread_config)
+                    logger.info(f"🔍 INITIAL: Pre-execution state exists: {initial_state is not None}")
+                except Exception as e:
+                    logger.info(f"🔍 INITIAL: No pre-existing state (expected): {e}")
+                
+                # Use astream with proper stream mode to handle interrupts
+                final_result = None
+                async for chunk in supervisor.astream(
+                    {"messages": messages},
+                    config=thread_config,
+                    stream_mode=["values", "updates"]
+                ):
                             logger.info(f"🔄 Stream chunk type: {type(chunk)}")
                             if isinstance(chunk, dict) and "__interrupt__" in chunk:
                                 logger.info(f"🔄 Found interrupt in chunk keys: {chunk.keys()}")
@@ -666,9 +656,26 @@ async def _run_agent_impl(
                                             else:
                                                 interrupt_info = interrupt_data
                                             
+                                            logger.info(f"🔍 INTERRUPT: Interrupt detected in values mode")
+                                            logger.info(f"🔍 INTERRUPT: State data keys: {list(data.keys())}")
+                                            logger.info(f"🔍 INTERRUPT: Messages count in state: {len(data.get('messages', []))}")
+                                            
+                                            # Check checkpoint state at interrupt time
+                                            try:
+                                                interrupt_state = await supervisor.aget_state(thread_config)
+                                                logger.info(f"🔍 INTERRUPT: Checkpoint state saved: {interrupt_state is not None}")
+                                                if interrupt_state and hasattr(interrupt_state, 'values'):
+                                                    logger.info(f"🔍 INTERRUPT: Checkpoint has {len(interrupt_state.values.get('messages', []))} messages")
+                                            except Exception as state_error:
+                                                logger.error(f"🔍 INTERRUPT: Error checking state during interrupt: {state_error}")
+                                            
+                                            # Include conversation_id in interrupt data for frontend
+                                            interrupt_info['conversation_id'] = conversation_id
+                                            
                                             # Send interrupt to frontend
                                             interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
                                             logger.info(f"Sending interrupt to frontend: {interrupt_info.get('interrupt_id', 'unknown')}")
+                                            logger.info(f"🔍 INTERRUPT: Backend UUID for resume: {conversation_id}")
                                             await queue.put(interrupt_message)
                                             
                                             # Don't send done=True, wait for frontend confirmation
@@ -687,6 +694,9 @@ async def _run_agent_impl(
                                                 interrupt_info = interrupt_data.value
                                             else:
                                                 interrupt_info = interrupt_data
+                                            
+                                            # Include conversation_id in interrupt data for frontend
+                                            interrupt_info['conversation_id'] = conversation_id
                                             
                                             # Send interrupt to frontend
                                             interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
@@ -710,19 +720,22 @@ async def _run_agent_impl(
                                         else:
                                             interrupt_info = interrupt_data
                                         
-                                        interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info)}__INTERRUPT_END__"
+                                        # Add backend conversation_id to interrupt data for frontend
+                                        interrupt_info_with_id = {**interrupt_info, "backend_conversation_id": conversation_id}
+                                        
+                                        interrupt_message = f"__INTERRUPT_START__{json.dumps(interrupt_info_with_id)}__INTERRUPT_END__"
                                         logger.info(f"Sending interrupt to frontend: {interrupt_info.get('interrupt_id', 'unknown')}")
                                         await queue.put(interrupt_message)
                                         
                                         return {"status": "interrupted", "conversation_id": conversation_id, "interrupt_data": interrupt_info}
-                        
-                        # If we get here, execution completed without interrupts
-                        logger.info("Supervisor system completed execution with streaming")
-                        if final_result:
-                            logger.info(f"Final result keys: {final_result.keys() if isinstance(final_result, dict) else 'not dict'}")
-                            
-                            # Extract and send the final AI response to frontend
-                            if isinstance(final_result, dict) and "messages" in final_result:
+                
+                # If we get here, execution completed without interrupts
+                logger.info("Supervisor system completed execution with streaming")
+                if final_result:
+                    logger.info(f"Final result keys: {final_result.keys() if isinstance(final_result, dict) else 'not dict'}")
+                    
+                    # Extract and send the final AI response to frontend
+                    if isinstance(final_result, dict) and "messages" in final_result:
                                 messages_result = final_result["messages"]
                                 # Find the last AI message
                                 for msg in reversed(messages_result):
@@ -730,36 +743,35 @@ async def _run_agent_impl(
                                         logger.info(f"Sending final AI response: {msg.content}")
                                         await queue.put(msg.content)
                                         break
-                        
-                        await queue.put({"done": True})
-                        return final_result
+                
+                await queue.put({"done": True})
+                return final_result
                     
-                    else:
-                        # Run supervisor without streaming
-                        logger.info("Starting supervisor system without streaming")
-                        
-                        # Create thread config for persistence
-                        thread_config = {
-                            "configurable": {
-                                "thread_id": conversation_id or str(uuid.uuid4()),
-                                "checkpoint_ns": "",
-                                "wallet_address": wallet_address
-                            }
-                        }
-                        
-                        try:
-                            result = await supervisor.ainvoke(
-                                {"messages": messages},
-                                config=thread_config
-                            )
-                            logger.info("Supervisor system completed execution without streaming")
-                            logger.info(f"Supervisor result: {result}")
-                            return result
-                        except Exception as e:
-                            error_msg = f"Error during supervisor execution: {str(e)}"
-                            logger.error(error_msg)
-                            logger.error(traceback.format_exc())
-                            return {"error": error_msg}
+            else:
+                # Run supervisor without streaming
+                logger.info("Starting supervisor system without streaming")
+                
+                # Create thread config for persistence
+                thread_config = {
+                    "configurable": {
+                        "thread_id": conversation_id or str(uuid.uuid4()),
+                        "wallet_address": wallet_address
+                    }
+                }
+                
+                try:
+                    result = await supervisor.ainvoke(
+                        {"messages": messages},
+                        config=thread_config
+                    )
+                    logger.info("Supervisor system completed execution without streaming")
+                    logger.info(f"Supervisor result: {result}")
+                    return result
+                except Exception as e:
+                    error_msg = f"Error during supervisor execution: {str(e)}"
+                    logger.error(error_msg)
+                    logger.error(traceback.format_exc())
+                    return {"error": error_msg}
         
         except Exception as e:
             error_msg = f"Failed to create MCP session: {str(e)}"

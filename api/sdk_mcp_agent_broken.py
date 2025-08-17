@@ -4,7 +4,7 @@ from mcp.client.stdio import stdio_client, get_default_environment
 from langchain_mcp_adapters.tools import load_mcp_tools # type: ignore
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
-from .supervisor_agent_system import get_supervisor, create_supervisor_system
+from .supervisor_agent_system import get_supervisor_or_create_supervisor, create_supervisor_system
 from .mcp_session_manager import get_mcp_session_manager, cleanup_mcp_session
 import os
 import asyncio

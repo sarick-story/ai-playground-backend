@@ -166,7 +166,9 @@ async def stream_agent_response(
 @app.post("/chat")
 async def handle_chat(request: Request, protocol: str = Query('data')):
     logger.info(f"Received chat request with {len(request.messages)} messages")
+    logger.info(f"🔍 FRONTEND: Raw conversation_id from frontend: {repr(request.conversation_id)}")
     conversation_id = request.conversation_id or str(uuid.uuid4())
+    logger.info(f"🔍 BACKEND: Using conversation_id: {conversation_id}")
     mcp_type = request.mcp_type or "storyscan"
     wallet_address = request.wallet_address
     
@@ -260,6 +262,7 @@ async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
     """Handle interrupt confirmation from frontend and resume execution."""
     confirmation_key = f"{request.conversation_id}:{request.interrupt_id}"
     
+    logger.info(f"🔍 RESUME: Frontend sent conversation_id: {repr(request.conversation_id)}")
     logger.info(f"Interrupt confirmation request: {{'interrupt_id': '{request.interrupt_id}', 'conversation_id': '{request.conversation_id}', 'confirmed': {request.confirmed}, 'wallet_address': '{request.wallet_address[:6]}...{request.wallet_address[-4:]}' if request.wallet_address else 'None'}}")
     
     # Check for duplicate/concurrent requests
@@ -293,10 +296,13 @@ async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
         )
         
         # Create response payload
+        # Always use "resumed" status if the AI generated a response, 
+        # regardless of whether the tool was confirmed or cancelled
         response_payload = {
-            "status": "resumed" if request.confirmed else "cancelled",
+            "status": "resumed",  # AI provided a response in both confirm/cancel cases
             "conversation_id": request.conversation_id,
-            "result": result
+            "result": result,
+            "tool_confirmed": request.confirmed  # Track whether tool was actually executed
         }
         
         # Log response (simplified to avoid f-string complexity)
