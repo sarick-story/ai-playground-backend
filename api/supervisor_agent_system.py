@@ -241,7 +241,7 @@ async def load_fresh_mcp_tools() -> List[Any]:
             logger.info("🔧 MCP: Loading tools...")
             tools = await load_mcp_tools(session)
 
-            supervisor, agents = await get_supervisor_or_create_supervisor()
+            supervisor = await get_supervisor_from_cache()
 
             logger.info(f"🔧 MCP: Successfully loaded {len(tools)} tools using exact documentation pattern")
             
@@ -330,6 +330,7 @@ async def create_all_agents(mcp_tools):
             "- Handle IPFS uploads and metadata creation\n"
             "- After completing tasks, respond to the supervisor with results\n"
             "- Be precise and include transaction details in responses"
+            "- Please provide the optional parameters for the tool calls to user"
         ),
         name="IP_ASSET_AGENT",
     )
@@ -348,6 +349,7 @@ async def create_all_agents(mcp_tools):
             "- Provide account status and token information\n"
             "- After completing tasks, respond to the supervisor with results\n"
             "- Include specific balance amounts and token addresses"
+            "- Please provide the optional parameters for the tool calls to user"
         ),
         name="IP_ACCOUNT_AGENT",
     )
@@ -367,6 +369,7 @@ async def create_all_agents(mcp_tools):
             "- Explain licensing implications to users\n"
             "- After completing tasks, respond to the supervisor with results\n"
             "- Include license terms details and costs in responses"
+            "- Please provide the optional parameters for the tool calls to user"
         ),
         name="IP_LICENSE_AGENT",
     )
@@ -397,6 +400,7 @@ async def create_all_agents(mcp_tools):
             "- After completing tasks, respond to the supervisor with results\n"
             "- Include collection addresses and fee information\n"
             "- If a tool fails, provide detailed error information to help with debugging"
+            "- Please provide the optional parameters for the tool calls to user"
         ),
         name="NFT_CLIENT_AGENT",
     )
@@ -417,6 +421,7 @@ async def create_all_agents(mcp_tools):
             "- Process dispute bonds and evidence\n"
             "- After completing tasks, respond to the supervisor with results\n"
             "- Include dispute IDs and bond amounts in responses"
+            "- Please provide the optional parameters for the tool calls to user"
         ),
         name="DISPUTE_AGENT",
     )
@@ -433,6 +438,7 @@ async def create_all_agents(mcp_tools):
             "- Handle group-related operations (currently no tools available)\n"
             "- Inform users about group functionality status\n"
             "- After completing tasks, respond to the supervisor with results"
+            "- Please provide the optional parameters for the tool calls to user"
         ),
         name="GROUP_AGENT",
     )
@@ -449,6 +455,7 @@ async def create_all_agents(mcp_tools):
             "- Handle permission-related operations (currently no tools available)\n"
             "- Inform users about permission functionality status\n"
             "- After completing tasks, respond to the supervisor with results"
+            "- Please provide the optional parameters for the tool calls to user"
         ),
         name="PERMISSION_AGENT",
     )
@@ -467,6 +474,7 @@ async def create_all_agents(mcp_tools):
             "- Calculate and process royalty distributions\n"
             "- After completing tasks, respond to the supervisor with results\n"
             "- Include payment amounts and recipient details"
+            "- Please provide the optional parameters for the tool calls to user"
         ),
         name="ROYALTY_AGENT",
     )
@@ -485,6 +493,7 @@ async def create_all_agents(mcp_tools):
             "- Explain WIP token mechanics and benefits\n"
             "- After completing tasks, respond to the supervisor with results\n"
             "- Include transaction hashes and token amounts"
+            "- Please provide the optional parameters for the tool calls to user"
         ),
         name="WIP_AGENT",
     )
@@ -675,16 +684,31 @@ async def resume_interrupted_conversation(
         else:
             logger.info(f"🔄 No messages found in result: {str(result)[:200]}...")
         
-        # Serialize the result to handle AIMessage and other LangChain objects
-        serialized_result = _serialize_langchain_objects(result)
+        # Extract only the last AI message content - no complex serialization needed
+        last_ai_content = None
+        if isinstance(result, dict) and 'messages' in result:
+            messages = result['messages']
+            # Find the last AI message
+            for msg in reversed(messages):
+                if hasattr(msg, '__class__') and 'AI' in msg.__class__.__name__:
+                    if hasattr(msg, 'content'):
+                        last_ai_content = msg.content
+                    break
         
         if confirmed:
             logger.info(f"Conversation resumed successfully: {conversation_id}")
-            logger.info(f"🔍 RETURN: Returning to frontend - status: completed, result keys: {list(serialized_result.keys()) if isinstance(serialized_result, dict) else type(serialized_result)}")
-            return {"status": "completed", "result": serialized_result}
+            return {
+                "status": "completed", 
+                "message": last_ai_content,
+                "conversation_id": conversation_id
+            }
         else:
             logger.info(f"Conversation cancelled by user: {conversation_id}")
-            return {"status": "cancelled", "result": serialized_result}
+            return {
+                "status": "cancelled", 
+                "message": last_ai_content,
+                "conversation_id": conversation_id
+            }
             
     except asyncio.TimeoutError:
         logger.error(f"Timeout resuming conversation {conversation_id} after 30 seconds")

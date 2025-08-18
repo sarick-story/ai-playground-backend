@@ -1,416 +1,684 @@
-# Fix Plan: MCP Tool Loading and Session Management Issues
+# Fix for Message Ordering Issues in Chat History - FUNDAMENTALLY REVISED
 
-## Problem Statement
+## Overview  
+Fix disappearing interrupt messages AND incorrect chronological ordering with a **simpler, more robust approach** that avoids timestamp complexity.
 
-The current MCP (Model Context Protocol) tool loading implementation suffers from `ClosedResourceError` and overly complex session management that doesn't align with LangGraph's recommended approach. Tools fail to execute after being loaded, causing workflow failures.
+## Root Cause Analysis
 
-### Root Cause Analysis
+### Issue 1: Disappearing Messages ✅ FIXED
+- **Chat messages**: Flow through `useChat` → `aiMessages` → `useEffect` syncs to `messages` state → Display
+- **Interrupt messages**: Manually added to `messages` state → `useEffect` overwrites with only `aiMessages` content → **Messages disappear**
 
-1. **Over-Engineered Session Management**: Manual management of MCP sessions with global state variables (`_persistent_session`, `_persistent_read`, `_persistent_write`) instead of using proper context managers.
+### Issue 2: Wrong Message Ordering 🚨 CRITICAL
+- **Current merge logic** (line 421): `[welcomeMessage, ...aiBasedMessages, ...sortedManualMessages]`
+- **Problem**: Concatenates arrays instead of true chronological merge
+- **Result**: All AI messages appear first, then ALL manual messages after (wrong order)
 
-2. **Manual Context Manager Usage**: Calling `__aenter__()` manually instead of using proper `async with` statements, leading to resource lifecycle issues.
+### Issue 3: Race Conditions 🚨 IDENTIFIED
+- **Direct state capture** (lines 215, 224, 296, 305): `setMessages([...messages, newMessage])`
+- **Problem**: Captures stale `messages` state, causing lost messages in rapid updates
+- **Result**: Messages can disappear or appear out of order
 
-3. **Complex Caching Logic**: Unnecessary 5-minute cache timeout, tool validation loops, and session health checks that add complexity without benefit.
+### Issue 4: Type Safety Issues 🚨 IDENTIFIED
+- **Missing fields**: Plan proposed `sequenceIndex`, `isFromAI` but Message interface doesn't include them
+- **Welcome message recreation**: Creates new timestamp every useEffect run, breaking sorting
+- **Result**: TypeScript errors and inconsistent behavior
 
-4. **Duplicate Functions**: `get_or_create_mcp_tools` is defined twice in `supervisor_agent_system.py` (lines 249 and 563).
+## Solution: Incremental Message Updates (MUCH SIMPLER)
+1. **Track processed AI messages** to avoid re-processing existing ones
+2. **Append new AI messages only** instead of replacing entire array
+3. **Fix race conditions** with proper functional updates  
+4. **Natural chronological order** preserved without timestamp manipulation
 
-5. **Unnecessary MultiMCPServerClient**: Code exists for `MultiMCPServerClient` which is not needed and adds complexity.
+---
 
-6. **Resource Lifecycle Issues**: Sessions are closed before tools can execute, causing `ClosedResourceError` as seen in logs.
+## Backend Implementation ✅ COMPLETED
 
-### LangGraph Recommended Approach
+### Step 1: Simplify Resume Function Response ✅ DONE
+**File:** `ai-playground-backend/api/supervisor_agent_system.py`
+- Modified `resume_interrupted_conversation()` to return simple `{status, message, conversation_id}`
+- Eliminated complex nested structure extraction
 
-According to LangGraph documentation, the simple and correct approach is:
-```python
-async with stdio_client(server_params) as (read, write):
-    async with ClientSession(read, write) as session:
-        await session.initialize()
-        tools = await load_mcp_tools(session)
-        # Use tools immediately
+### Step 2: Update Chat Endpoint Response Handling ✅ DONE
+**File:** `ai-playground-backend/api/chat.py`
+- Modified response payload to use simple structure
+- Direct `result.get("message")` extraction
+
+---
+
+## Frontend Implementation - Simpler Incremental Approach
+
+### Step 3: Add AI Message Tracking
+**File:** `ai-playground-frontend/app/page.tsx`
+
+Add state to track which AI messages have been processed (around line 120):
+
+**ADD AFTER LINE 120:**
+```typescript
+// Track which AI message IDs have already been processed to avoid duplicates
+const processedAiMessageIds = useRef<Set<string>>(new Set());
 ```
 
-## Solution Overview
+**No interface changes needed** - keep the existing Message interface as-is.
 
-Replace the complex manual session management with LangGraph's recommended simple context manager approach. This will eliminate resource lifecycle issues and make the code more maintainable.
+### Step 4: Fix useEffect with Incremental Updates  
+**File:** `ai-playground-frontend/app/page.tsx`
 
-## Implementation Plan
+Replace the entire useEffect (lines 374-424):
 
-### Phase 1: Clean Up Current Issues
-
-#### 1.1 Remove MultiMCPServerClient Usage
-**File**: `ai-playground-backend/api/mcp_session_manager.py`
-
-Remove all `MultiMCPServerClient` usage:
-```python
-# DELETE these lines:
-from langchain_mcp_adapters.client import MultiServerMCPClient
-
-# DELETE the entire if use_multi_client block (lines 32-50)
-if use_multi_client:
-    # Use MultiServerMCPClient for better session management
-    logger.info("Initializing MultiServerMCPClient")
-    ...
-```
-
-**Justification**: Not needed according to LangGraph docs and adds unnecessary complexity.
-
-#### 1.2 Remove Duplicate Functions
-**File**: `ai-playground-backend/api/supervisor_agent_system.py`
-
-Remove the second `get_or_create_mcp_tools` function starting at line 563. Keep only the first one at line 249, which we'll refactor in Phase 2.
-
-#### 1.3 Remove Global Session State Variables
-**File**: `ai-playground-backend/api/supervisor_agent_system.py`
-
-Remove these global variables (lines 136-143):
-```python
-# DELETE these lines:
-_mcp_tools: List[Any] | None = None
-_last_used: float = 0.0
-_lock = asyncio.Lock()
-_persistent_session: Any | None = None
-_persistent_read = None
-_persistent_write = None
-_session_server_path: str | None = None
-```
-
-### Phase 2: Implement LangGraph Recommended Approach
-
-#### 2.1 Create Simple MCP Tool Loading Function
-**File**: `ai-playground-backend/api/supervisor_agent_system.py`
-
-Replace the complex `get_or_create_mcp_tools` function with this simple implementation:
-
-```python
-async def load_fresh_mcp_tools() -> List[Any]:
-    """Load MCP tools using LangGraph recommended approach.
-    
-    This approach uses proper context managers to ensure session lifecycle
-    is handled correctly, eliminating ClosedResourceError issues.
-    """
-    logger.info("🔧 MCP: Loading fresh MCP tools using LangGraph recommended approach")
-    
-    # Find server path
-    server_path = _find_mcp_server_path()
-    
-    # Create server parameters
-    server_params = StdioServerParameters(
-        command=sys.executable,
-        args=[server_path],
-        env=None  # Use current environment
-    )
-    
-    logger.info(f"🔧 MCP: Using server at: {server_path}")
-    
-    # Use LangGraph recommended context manager approach
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            logger.info("🔧 MCP: Session initialized successfully")
-            
-            tools = await load_mcp_tools(session)
-            logger.info(f"🔧 MCP: Loaded {len(tools)} tools successfully")
-            
-            # Validate tools
-            valid_tools = []
-            for i, tool in enumerate(tools):
-                try:
-                    tool_name = getattr(tool, 'name', f'tool_{i}')
-                    if hasattr(tool, 'invoke') and callable(getattr(tool, 'invoke')):
-                        valid_tools.append(tool)
-                        logger.info(f"🔧 MCP: Tool '{tool_name}' validated successfully")
-                    else:
-                        logger.warning(f"🔧 MCP: Tool '{tool_name}' is not invokable, skipping")
-                except Exception as e:
-                    logger.error(f"🔧 MCP: Error validating tool {i}: {e}")
-            
-            logger.info(f"🔧 MCP: {len(valid_tools)} valid tools ready for use")
-            return valid_tools
-
-def _find_mcp_server_path() -> str:
-    """Find the MCP server path using existing logic."""
-    server_path = os.environ.get("SDK_MCP_SERVER_PATH")
-    if not server_path:
-        possible_paths = [
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                         "story-mcp-hub/story-sdk-mcp/server.py"),
-            os.path.join(os.getcwd(), "story-mcp-hub/story-sdk-mcp/server.py"),
-            os.path.join(os.path.dirname(os.getcwd()), "story-mcp-hub/story-sdk-mcp/server.py"),
-        ]
+**FIND THIS CODE:**
+```typescript
+  // Add debugging for aiMessages and interrupt detection
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'development') {
+      console.log("AI Messages updated", aiMessages);
+      
+      // Log message content for debugging
+      if (aiMessages.length > 0) {
+        const latestMessage = aiMessages[aiMessages.length - 1];
+        console.log("Latest AI message content:", latestMessage.content);
         
-        for path in possible_paths:
-            if os.path.exists(path):
-                return path
+        // Check for interrupt in the latest message
+        if (latestMessage.content.includes('__INTERRUPT_START__')) {
+          console.log("Interrupt pattern found in message");
+        }
+      }
+    }
+    
+    // Update messages state while preserving manually added messages
+    if (aiMessages.length > 0) {
+      const aiBasedMessages = aiMessages.map(msg => ({
+        id: msg.id,
+        content: detectInterruptMessage(msg.content), // Process interrupts
+        sender: (msg.role === "user" ? "user" : "bot") as "user" | "bot",
+        timestamp: new Date(),
+      }));
+
+      setMessages(prev => {
+        // Preserve manually added messages (interrupt, transaction, error messages)
+        const manualMessages = prev.filter(msg => 
+          !aiBasedMessages.some(aiMsg => aiMsg.id === msg.id) && 
+          msg.id !== "welcome" && 
+          msg.id !== "1"  // Initial welcome message
+        );
         
-        raise FileNotFoundError("Could not find MCP server at any expected location")
-    
-    if not os.path.exists(server_path):
-        raise FileNotFoundError(f"MCP server not found at: {server_path}")
-    
-    return server_path
-```
-
-#### 2.2 Remove Complex Session Management Functions
-**File**: `ai-playground-backend/api/supervisor_agent_system.py`
-
-Delete these functions entirely:
-- `_cleanup_persistent_session` (lines 214-246)
-- `_create_persistent_session` (lines 388-432)
-- `_load_tools_from_persistent_session` (lines 435-560)
-- `validate_mcp_session_health` (lines 702-721)
-- `cleanup_mcp_cache` (lines 723-728)
-
-### Phase 3: Update Agent Creation
-
-#### 3.1 Update `create_all_agents` Function
-**File**: `ai-playground-backend/api/supervisor_agent_system.py`
-
-Replace the MCP tools loading section (lines 768-783):
-```python
-async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
-    """Create all agents with properly loaded tools."""
-    
-    # Load MCP tools with proper error handling
-    if mcp_tools:
-        # Use provided MCP tools directly
-        direct_tools = mcp_tools
-        logger.info(f"Using provided MCP tools: {len(direct_tools)} tools")
-    else:
-        # Load fresh MCP tools using LangGraph approach
-        try:
-            direct_tools = await load_fresh_mcp_tools()
-            logger.info(f"Loaded fresh MCP tools: {len(direct_tools)} tools")
-        except Exception as e:
-            logger.error(f"Failed to load MCP tools: {e}")
-            direct_tools = []
-            logger.warning("Continuing with empty tools list - agents will have limited functionality")
-    
-    # Rest of function remains the same...
-```
-
-#### 3.2 Update `create_supervisor_system` Function
-**File**: `ai-playground-backend/api/supervisor_agent_system.py`
-
-Update the function to load tools if not provided:
-```python
-async def create_supervisor_system(mcp_tools=None, checkpointer=None, store=None):
-    """Create the complete supervisor system with all agents."""
-    
-    # Load MCP tools if not provided
-    if mcp_tools is None:
-        mcp_tools = await load_fresh_mcp_tools()
-    
-    # Use provided or default checkpointer/store
-    checkpointer = checkpointer or GLOBAL_CHECKPOINTER
-    store = store or GLOBAL_STORE
-    
-    # Create all agents with loaded tools
-    agents = await create_all_agents(checkpointer=checkpointer, store=store, mcp_tools=mcp_tools)
-    
-    # Rest of function remains the same...
-```
-
-### Phase 4: Update SDK Agent Integration
-
-#### 4.1 Update `_run_agent_impl` Function
-**File**: `ai-playground-backend/api/sdk_mcp_agent.py`
-
-Replace the complex MCP loading section (lines 475-521) with:
-```python
-async def _run_agent_impl(
-    user_message: str,
-    wallet_address: Optional[str] = None,
-    queue: Optional[asyncio.Queue] = None,
-    conversation_id: Optional[str] = None,
-    message_history: Optional[List[Dict[str, str]]] = None,
-    task_token: str = ""
-):
-    # ... existing code until MCP loading section ...
-    
-    # Load MCP tools using simplified approach
-    try:
-        logger.info("🔧 MCP TOOLS: Loading tools using LangGraph approach...")
-        load_start_time = time.time()
+        // Always include the welcome message at the beginning
+        const welcomeMessage: Message = {
+          id: "welcome",
+          content: "Hello! How can I help you today?",
+          sender: "bot",
+          timestamp: new Date(),
+        };
         
-        tools = await load_fresh_mcp_tools()  # Import from supervisor_agent_system
+        // Sort manual messages by timestamp to maintain order
+        const sortedManualMessages = manualMessages.sort((a, b) => 
+          a.timestamp.getTime() - b.timestamp.getTime()
+        );
         
-        load_duration = time.time() - load_start_time
-        logger.info(f"🔧 MCP TOOLS: Loaded {len(tools)} tools in {load_duration:.2f} seconds")
-        
-        if not tools:
-            logger.error("🔧 MCP TOOLS: No tools loaded - agent will not have MCP capabilities")
-        else:
-            logger.info(f"🔧 MCP TOOLS: Successfully loaded tools: {[getattr(t, 'name', 'unnamed') for t in tools]}")
-        
-    except Exception as e:
-        error_msg = f"Failed to load MCP tools: {e}"
-        logger.error(f"🔧 MCP TOOLS ERROR: {error_msg}")
-        if queue:
-            await queue.put({"error": error_msg})
-            await queue.put({"done": True})
-        return {"error": error_msg}
-    
-    # Rest of function remains the same...
+        // Merge: welcome + AI messages + preserved manual messages in chronological order
+        return [welcomeMessage, ...aiBasedMessages, ...sortedManualMessages];
+      });
+    }
+  }, [aiMessages, selectedMCPServerId, address]);
 ```
 
-### Phase 5: Simplify Other MCP Usage
+**REPLACE WITH:**
+```typescript
+  // Incremental AI message processing - only add NEW messages
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'development') {
+      console.log("AI Messages updated", aiMessages);
+      
+      // Log message content for debugging
+      if (aiMessages.length > 0) {
+        const latestMessage = aiMessages[aiMessages.length - 1];
+        console.log("Latest AI message content:", latestMessage.content);
+        
+        // Check for interrupt in the latest message
+        if (latestMessage.content.includes('__INTERRUPT_START__')) {
+          console.log("Interrupt pattern found in message");
+        }
+      }
+    }
+    
+    // Find NEW AI messages that haven't been processed yet
+    const newAiMessages = aiMessages.filter(msg => 
+      !processedAiMessageIds.current.has(msg.id)
+    );
+    
+    if (newAiMessages.length > 0) {
+      // Convert new AI messages to Message format
+      const newMessages = newAiMessages.map(msg => ({
+        id: msg.id,
+        content: detectInterruptMessage(msg.content), // Process interrupts
+        sender: (msg.role === "user" ? "user" : "bot") as "user" | "bot",
+        timestamp: new Date(), // Use actual timestamp when message was added
+      }));
 
-#### 5.1 Update `tools_wrapper.py`
-**File**: `ai-playground-backend/api/tools_wrapper.py`
-
-Replace the `load_sdk_mcp_tools` function with a simple wrapper:
-```python
-async def load_sdk_mcp_tools() -> List:
-    """Load SDK MCP tools using the simplified approach."""
-    from .supervisor_agent_system import load_fresh_mcp_tools
-    return await load_fresh_mcp_tools()
+      // Add new messages to the END (preserves chronological order)
+      setMessages(prev => [...prev, ...newMessages]);
+      
+      // Mark these messages as processed
+      newAiMessages.forEach(msg => {
+        processedAiMessageIds.current.add(msg.id);
+      });
+    }
+  }, [aiMessages, selectedMCPServerId, address]);
 ```
 
-#### 5.2 Update `mcp_agent.py` (if used)
-**File**: `ai-playground-backend/api/mcp_agent.py`
+### Step 5: Add Reset Function Reset Handler
+**File:** `ai-playground-frontend/app/page.tsx`
 
-Replace the complex MCP loading in `run_agent` function with:
-```python
-async def run_agent(
-    user_message: str, 
-    queue: Optional[asyncio.Queue] = None, 
-    conversation_id: Optional[str] = None,
-    message_history: Optional[List[Dict[str, str]]] = None
-):
-    # ... existing code until MCP loading ...
-    
-    # Load MCP tools using simplified approach
-    from .supervisor_agent_system import load_fresh_mcp_tools
-    tools = await load_fresh_mcp_tools()
-    
-    # Rest of function remains the same...
+Fix the resetConversation function to clear processed message tracking:
+
+**FIND THIS CODE (around line 695):**
+```typescript
+const resetConversation = () => {
+  const welcomeMessage: Message = {
+    id: "welcome",
+    content: "Hello! How can I help you today?",
+    sender: "bot",
+    timestamp: new Date(),
+  };
+  setMessages([welcomeMessage]);
+  
+  // Reset the AI SDK messages
+  setAiMessages([]);
+};
 ```
 
-### Phase 6: Remove Unused Files (Optional)
+**REPLACE WITH:**
+```typescript
+const resetConversation = () => {
+  const welcomeMessage: Message = {
+    id: "welcome",
+    content: "Hello! How can I help you today?",
+    sender: "bot",
+    timestamp: new Date(),
+  };
+  setMessages([welcomeMessage]);
+  
+  // Reset the AI SDK messages
+  setAiMessages([]);
+  
+  // Clear processed message tracking
+  processedAiMessageIds.current.clear();
+};
+```
 
-#### 6.1 Consider Removing `mcp_session_manager.py`
-**File**: `ai-playground-backend/api/mcp_session_manager.py`
+### Step 6: Fix Race Conditions in Manual Message Insertion
+**File:** `ai-playground-frontend/app/page.tsx`
 
-This file may no longer be needed if not used elsewhere. Check for imports and remove if unused.
+#### A. Fix Interrupt Confirmation Messages (lines 937-964)
 
-## Testing Plan
+**FIND THIS CODE:**
+```typescript
+      // Add a message about the user's decision
+      const statusMessage = confirmed 
+        ? "✅ Operation confirmed, continuing..."
+        : "❌ Operation cancelled by user";
+      
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: statusMessage,
+        sender: "bot",
+        timestamp: new Date(),
+      }]);
 
-### Test Case 1: Basic Tool Loading
-1. Start the backend
-2. Send a request that requires MCP tools
-3. **Expected**: Tools load successfully without `ClosedResourceError`
+      // Add AI response if available (simplified structure)
+      if (result.status === 'completed' && result.message) {
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          content: result.message,
+          sender: "bot",
+          timestamp: new Date(),
+        }]);
+      } else if (result.status === 'cancelled' && result.message) {
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          content: result.message,
+          sender: "bot",
+          timestamp: new Date(),
+        }]);
+      }
+```
 
-### Test Case 2: Tool Execution
-1. Trigger a tool that requires confirmation (e.g., `create_spg_nft_collection`)
-2. Confirm the action
-3. **Expected**: Tool executes successfully without session errors
+**REPLACE WITH:**
+```typescript
+      // Use proper functional updates to prevent race conditions
+      const statusMessage = confirmed 
+        ? "✅ Operation confirmed, continuing..."
+        : "❌ Operation cancelled by user";
+      
+      // Add status message first
+      setMessages(prev => [...prev, {
+        id: `interrupt-status-${Date.now()}`,
+        content: statusMessage,
+        sender: "bot",
+        timestamp: new Date(),
+      }]);
 
-### Test Case 3: Multiple Requests
-1. Send multiple requests in sequence
-2. **Expected**: Each request loads tools fresh without caching issues
+      // Add AI response message
+      if (result.status === 'completed' && result.message) {
+        setMessages(prev => [...prev, {
+          id: `interrupt-resume-${Date.now()}`,
+          content: result.message,
+          sender: "bot",
+          timestamp: new Date(),
+        }]);
+      } else if (result.status === 'cancelled' && result.message) {
+        setMessages(prev => [...prev, {
+          id: `interrupt-cancel-${Date.now()}`,
+          content: result.message,
+          sender: "bot",
+          timestamp: new Date(),
+        }]);
+      }
+```
 
-### Test Case 4: Error Handling
-1. Temporarily move the MCP server file
-2. Send a request
-3. **Expected**: Clear error message, no hanging sessions
+### Step 7: Fix All Manual Message Insertion Race Conditions
+**File:** `ai-playground-frontend/app/page.tsx`
 
-## Benefits of This Approach
+#### B. Fix Transaction Messages (Lines 215, 224, 296, 305)
 
-### 1. Eliminates ClosedResourceError
-- Context managers ensure proper session lifecycle
-- No manual session management to go wrong
-- Resources are cleaned up automatically
+**CURRENT RACE CONDITION PATTERN:**
+```typescript
+// BAD - captures stale messages state
+setMessages([...messages, newMessage]);
+```
 
-### 2. Follows LangGraph Best Practices
-- Uses documented approach from LangGraph team
-- Simpler and more maintainable code
-- Aligned with community standards
+**SAFE FUNCTIONAL UPDATE PATTERN:**
+```typescript
+// GOOD - uses current state from prev parameter  
+setMessages(prev => [...prev, {
+  id: `tx-${Date.now()}`,
+  content: "Transaction message...",
+  sender: "bot",
+  timestamp: new Date(),
+}]);
+```
 
-### 3. Reduces Complexity
-- Removes ~500 lines of complex session management code
-- Eliminates duplicate functions
-- Removes unnecessary caching logic
+**SPECIFIC FIXES:**
 
-### 4. Improves Reliability
-- No global state to get corrupted
-- Fresh tools for each request ensures consistency
-- Proper error handling and logging
+**Fix Line 215 (Transaction message in onResponse):**
+```typescript
+// FIND:
+setMessages([...messages, {
+  id: Date.now().toString(),
+  content: jsonData.message,
+  sender: "bot",
+  timestamp: new Date(),
+}]);
 
-### 5. Better Performance
-- Eliminates overhead of complex validation loops
-- No unnecessary session health checks
-- Faster startup with simpler logic
+// REPLACE WITH:
+setMessages(prev => [...prev, {
+  id: `tx-success-${Date.now()}`,
+  content: jsonData.message,
+  sender: "bot",
+  timestamp: new Date(),
+}]);
+```
 
-## Migration Strategy
+**Fix Line 224 (Transaction error in onResponse):**
+```typescript
+// FIND:
+setMessages([...messages, {
+  id: Date.now().toString(),
+  content: `❌ Error preparing transaction: ${error.message}`,
+  sender: "bot",
+  timestamp: new Date(),
+}]);
 
-### Backward Compatibility
-- All existing APIs continue to work unchanged
-- No changes to frontend required
-- Existing conversation flows unaffected
+// REPLACE WITH:
+setMessages(prev => [...prev, {
+  id: `tx-error-${Date.now()}`,
+  content: `❌ Error preparing transaction: ${error.message}`,
+  sender: "bot",
+  timestamp: new Date(),
+}]);
+```
 
-### Rollback Plan
-If issues arise:
-1. Keep backup of current `supervisor_agent_system.py`
-2. Can quickly revert to previous complex approach
-3. Monitor logs for any new error patterns
+**Fix Line 296 (Transaction message in onError):**
+```typescript
+// FIND:
+setMessages([...messages, {
+  id: Date.now().toString(),
+  content: data.message,
+  sender: "bot",
+  timestamp: new Date(),
+}]);
 
-### Deployment Steps
-1. Test changes in development environment
-2. Deploy to staging and run full test suite
-3. Monitor logs for any ClosedResourceError occurrences
-4. Deploy to production with monitoring
+// REPLACE WITH:
+setMessages(prev => [...prev, {
+  id: `tx-error-response-${Date.now()}`,
+  content: data.message,
+  sender: "bot",
+  timestamp: new Date(),
+}]);
+```
 
-## Success Criteria
+**Fix Line 305 (Transaction error in onError):**
+```typescript
+// FIND:
+setMessages([...messages, {
+  id: Date.now().toString(),
+  content: `❌ Error preparing transaction: ${err.message}`,
+  sender: "bot", 
+  timestamp: new Date(),
+}]);
 
-### Primary Goals
-- [ ] No `ClosedResourceError` in logs
-- [ ] All MCP tools load successfully
-- [ ] Tool execution works reliably
-- [ ] Agent workflows complete without session errors
+// REPLACE WITH:
+setMessages(prev => [...prev, {
+  id: `tx-processing-error-${Date.now()}`,
+  content: `❌ Error preparing transaction: ${err.message}`,
+  sender: "bot", 
+  timestamp: new Date(),
+}]);
+```
 
-### Secondary Goals
-- [ ] Reduced code complexity (measured by lines of code)
-- [ ] Faster agent initialization
-- [ ] Cleaner log output
-- [ ] Improved maintainability
+#### D. Fix Additional Transaction Race Conditions **🚨 MISSED IN ORIGINAL PLAN**
 
-## Timeline
+**Fix Line 833-840 (Transaction success handling):**
+```typescript
+// FIND:
+const newMessages = [...messages];
+newMessages.push({
+  id: Date.now().toString(),
+  content: `✅ Transaction sent successfully! Transaction hash: ${hash}`,
+  sender: "bot",
+  timestamp: new Date(),
+});
+setMessages(newMessages);
 
-1. **Phase 1**: Clean Up Current Issues - 30 minutes
-2. **Phase 2**: Implement LangGraph Approach - 45 minutes
-3. **Phase 3**: Update Agent Creation - 20 minutes
-4. **Phase 4**: Update SDK Agent Integration - 15 minutes
-5. **Phase 5**: Simplify Other MCP Usage - 15 minutes
-6. **Phase 6**: Optional Cleanup - 10 minutes
-7. **Testing**: 30 minutes
-8. **Documentation**: 15 minutes
+// REPLACE WITH:
+setMessages(prev => [...prev, {
+  id: `tx-success-${Date.now()}`,
+  content: `✅ Transaction sent successfully! Transaction hash: ${hash}`,
+  sender: "bot",
+  timestamp: new Date(),
+}]);
+```
 
-**Total**: ~3 hours
+**Fix Line 859-866 (Transaction error handling):**
+```typescript
+// FIND:
+const newMessages = [...messages];
+newMessages.push({
+  id: Date.now().toString(),
+  content: `❌ Transaction failed: ${errorMessage}`,
+  sender: "bot",
+  timestamp: new Date(),
+});
+setMessages(newMessages);
 
-## Key Insights
+// REPLACE WITH:
+setMessages(prev => [...prev, {
+  id: `tx-failure-${Date.now()}`,
+  content: `❌ Transaction failed: ${errorMessage}`,
+  sender: "bot",
+  timestamp: new Date(),
+}]);
+```
 
-### From LangGraph Documentation
-- Simple context manager approach is preferred
-- No need for complex session caching
-- Let context managers handle resource lifecycle
+**Fix Line 1221-1228 (Transaction rejection handling):**
+```typescript
+// FIND:
+const newMessages = [...messages];
+newMessages.push({
+  id: Date.now().toString(),
+  content: "Transaction rejected by user",
+  sender: "bot",
+  timestamp: new Date(),
+});
+setMessages(newMessages);
 
-### From Current Issues
-- Manual session management causes resource leaks
-- Complex caching adds bugs without benefits
-- Global state variables are error-prone
+// REPLACE WITH:
+setMessages(prev => [...prev, {
+  id: `tx-rejected-${Date.now()}`,
+  content: "Transaction rejected by user",
+  sender: "bot",
+  timestamp: new Date(),
+}]);
+```
 
-### From Log Analysis
-- `ClosedResourceError` occurs when tools try to use closed sessions
-- Session cleanup happens before tool execution
-- Complex validation loops don't prevent the core issue
+---
 
-## Validation Steps
+## Implementation Checklist - REVISED
 
-After implementation:
-1. Check logs for absence of `ClosedResourceError`
-2. Verify all agents can load tools successfully  
-3. Test tool execution end-to-end
-4. Confirm no regression in existing functionality
-5. Monitor memory usage (should be similar or better)
+### Backend Tasks ✅ COMPLETED (30 minutes)
+- [x] **Step 1**: Simplify `resume_interrupted_conversation()` return structure
+- [x] **Step 2**: Update response handling in `chat.py` interrupt endpoint
 
-**Confidence Level**: ⭐⭐⭐⭐⭐ (5/5) - Approach is validated by LangGraph documentation and addresses root cause directly.
+### Frontend Tasks 🚀 SIMPLIFIED APPROACH (2 hours) **FUNDAMENTALLY REVISED**
+- [ ] **Step 3**: Add AI message tracking with useRef
+- [ ] **Step 4**: Fix useEffect with incremental updates (append new messages only)
+- [ ] **Step 5**: Update reset function to clear message tracking
+- [ ] **Step 6**: Fix interrupt confirmation race conditions (functional updates)
+- [ ] **Step 7**: Fix ALL transaction race conditions (7 locations total)
+
+### Integration Testing (1 hour)
+- [ ] **Test 1**: Normal chat flow maintains correct order
+- [ ] **Test 2**: Interrupt messages appear in correct chronological position after useEffect runs
+- [ ] **Test 3**: User messages after interrupt appear in correct position
+- [ ] **Test 4**: Transaction messages maintain correct order with no race conditions
+- [ ] **Test 5**: Multiple rapid interactions maintain proper sequence (stress test)
+- [ ] **Test 6**: MCP server switching doesn't trigger unnecessary useEffect reruns
+- [ ] **Test 7**: Welcome message remains stable and always appears first
+- [ ] **Test 8**: Manual messages added during AI streaming don't get lost
+
+---
+
+## Expected Message Flow After Fix
+
+### Correct Chronological Order:
+```
+1. Welcome message (stable reference, always first)
+2. User: "send 1 IP to 0x123" 
+3. AI: "I'll help you send..." (with interrupt trigger)
+4. Manual: "✅ Operation confirmed, continuing..." (t=1000ms)
+5. Manual: "Transaction completed successfully" (t=1050ms) 
+6. User: "what's my balance?" (t=5000ms)
+7. AI: "Your balance is 100 IP" (t=7000ms)
+```
+
+### Robust Timestamp Handling:
+- **AI messages**: Index-based timestamps preserving conversation order
+- **Manual messages**: Actual occurrence timestamps with sequence offsets
+- **Sorting**: insertionTime takes precedence over timestamp for accuracy
+- **Welcome**: Fixed historical timestamp ensuring it's always first
+
+---
+
+## Key Technical Changes - REVISED
+
+### 1. Type Safety Improvements
+```typescript
+// OLD: Missing fields cause ordering issues
+interface Message {
+  id: string;
+  content: string; 
+  sender: "user" | "bot";
+  timestamp: Date;
+}
+
+// NEW: Rich metadata for robust ordering
+interface Message {
+  id: string;
+  content: string;
+  sender: "user" | "bot"; 
+  timestamp: Date;
+  sequenceIndex?: number;
+  messageSource?: 'ai' | 'manual' | 'system';
+  insertionTime?: number;
+}
+```
+
+### 2. Race Condition Prevention
+```typescript
+// OLD: Captures stale state (race conditions)
+setMessages([...messages, newMessage]);
+
+// NEW: Functional updates with current state
+setMessages(prev => {
+  const newMessage = {...};
+  return [...prev, newMessage];
+});
+```
+
+### 3. True Chronological Sorting
+```typescript
+// OLD: Wrong array concatenation
+[...aiBasedMessages, ...sortedManualMessages]
+
+// NEW: Unified sorting by insertion time
+allMessages.sort((a, b) => {
+  const timeA = a.insertionTime || a.timestamp.getTime();
+  const timeB = b.insertionTime || b.timestamp.getTime();
+  return timeA - timeB;
+});
+```
+
+### 4. Stable Reference Patterns
+```typescript
+// OLD: Recreation causes unstable sorting
+const welcomeMessage = { timestamp: new Date(), ... };
+
+// NEW: Stable reference prevents issues
+const welcomeMessageRef = useRef<Message>({
+  timestamp: new Date(Date.now() - 86400000), // Fixed historical time
+  ...
+});
+```
+
+### 5. Simplified Dependencies
+```typescript
+// OLD: Unnecessary reruns
+useEffect(() => {...}, [aiMessages, selectedMCPServerId, address]);
+
+// NEW: Only when actually needed  
+useEffect(() => {...}, [aiMessages]);
+```
+
+---
+
+## Edge Cases Addressed - SIMPLIFIED APPROACH
+
+### 1. **Race Condition Prevention** ✅ **COMPREHENSIVE**
+- **Issue**: 7 locations using dangerous `[...messages]` pattern causing stale state capture
+- **Solution**: ALL converted to functional updates `setMessages(prev => [...])`
+- **Benefit**: **Zero race conditions** - all manual message insertions are safe
+
+### 2. **Message Processing Duplication** ✅ **ELEGANT**
+- **Issue**: AI messages could be processed multiple times by useEffect
+- **Solution**: Track processed message IDs with `useRef<Set<string>>`
+- **Benefit**: **Zero duplicates** - each AI message processed exactly once
+
+### 3. **Natural Chronological Order** ✅ **SIMPLE**
+- **Issue**: Complex timestamp sorting causing instability
+- **Solution**: Append new messages to END (preserves natural chronological order)
+- **Benefit**: **Perfect ordering** - messages appear exactly when they occurred
+
+### 4. **Reset Function Integrity** ✅ **CLEAN**
+- **Issue**: Reset doesn't clear message tracking, causing stale references
+- **Solution**: Clear `processedAiMessageIds` set on reset
+- **Benefit**: **Clean slate** - fresh conversation tracking after reset
+
+### 5. **Concurrent Message Addition** ✅ **ROBUST**
+- **Issue**: Manual messages added during AI streaming could interfere
+- **Solution**: Incremental approach never overwrites existing messages
+- **Benefit**: **Perfect coexistence** - AI and manual messages work seamlessly
+
+### 6. **Welcome Message Stability** ✅ **AUTOMATIC**
+- **Issue**: Welcome message recreation causing position instability
+- **Solution**: Welcome message added once at initialization, never overwritten
+- **Benefit**: **Rock solid** - welcome always first, never moves
+
+### **🎯 NO COMPLEX TIMESTAMP LOGIC NEEDED**
+- **Previous complexity**: insertionTime, sequenceIndex, messageSource fields
+- **New simplicity**: Use natural append order - messages appear when they happen
+- **Result**: **Much more reliable** and easier to debug
+
+---
+
+## Risk Assessment - SIMPLIFIED APPROACH  
+
+### Extremely Low Risk ✅
+- **No interface changes**: Keep existing Message interface as-is
+- **Minimal architectural changes**: Just add useRef tracking + fix race conditions  
+- **Proven patterns**: Incremental updates are standard React practice
+- **Easy rollback**: Simple changes, easy to undo if needed
+- **No complex logic**: Eliminate timestamp complexity completely
+
+### Low Complexity ✅
+- **Single file touched**: Only `page.tsx` needs changes
+- **Simple patterns**: useRef + functional updates + append-only logic  
+- **Easy to test**: Natural behavior is easy to verify
+
+### Timeline Estimation - SIMPLIFIED APPROACH
+- **Add useRef tracking**: 10 minutes 
+- **Fix useEffect (simpler incremental approach)**: 30 minutes  
+- **Update reset function**: 5 minutes
+- **Fix race conditions (7 locations)**: 45 minutes
+- **Testing & validation**: 30 minutes *(much simpler to test)*
+- **Total time**: **2 hours** *(reduced from 4.5 hours!)*
+
+✅ **Demo feasibility**: **Easily achievable - much simpler approach**
+
+---
+
+## Expected Benefits After Complete Fix
+
+### 1. **Perfect Message Ordering** ✅
+- Messages appear in **exact chronological order** - when they actually occurred
+- AI messages and manual messages naturally interleave correctly
+- Interrupt/resume flow maintains **perfect conversation context**  
+- Transaction messages appear **exactly when they happen**
+
+### 2. **Bulletproof Reliability** ✅
+- **Zero race conditions** - all 7 dangerous patterns fixed with functional updates
+- **Zero message duplication** - useRef tracking prevents reprocessing
+- **Zero lost messages** - incremental approach never overwrites existing content
+- **Perfect concurrent handling** - AI streaming + manual messages work flawlessly
+
+### 3. **Elegant Simplicity** ✅
+- **No complex timestamp logic** - natural append order just works
+- **No interface changes** - keep existing Message structure
+- **Minimal code changes** - just useRef + functional updates + append logic
+- **Easy to understand** and debug for future developers
+
+### 4. **Demo-Perfect Experience** ✅
+- **Natural conversation flow** that feels completely professional
+- **Reliable interrupt/resume demonstrations** - messages always appear correctly
+- **Smooth transaction flows** - success/error messages in perfect sequence
+- **Zero surprising behavior** - everything works as users expect
+
+### 5. **Development Confidence** ✅
+- **Much simpler to test** - natural behavior is easy to verify
+- **Easy to extend** - adding new message types is straightforward
+- **Low maintenance** - no complex sorting or timestamp logic to maintain
+- **Battle-tested patterns** - useRef + functional updates are React best practices
+
+---
+
+## Summary: Fundamentally Better Approach
+
+### What Changed From Original Complex Plan:
+❌ **REMOVED**: Complex timestamp manipulation causing instability  
+❌ **REMOVED**: Interface extensions with extra metadata fields  
+❌ **REMOVED**: Complex chronological sorting logic  
+❌ **REMOVED**: Welcome message useRef complications
+
+### What The New Simple Plan Does:
+✅ **ADDED**: Track processed AI message IDs with simple `useRef<Set<string>>`  
+✅ **SIMPLIFIED**: Append-only logic - new messages go to END naturally  
+✅ **FIXED**: All 7 race conditions with functional updates  
+✅ **KEPT**: Original Message interface - no breaking changes
+
+### The Result:
+- **2 hours** instead of 4.5 hours  
+- **Much more reliable** - no timestamp instability  
+- **Much simpler** - easier to implement and debug  
+- **Perfect ordering** - messages appear exactly when they occurred  
+- **Demo-ready** - bulletproof reliability for tomorrow's presentation
+
+**This approach leverages natural chronological order instead of fighting it with complex timestamp logic. Messages are appended when they happen, preserving perfect chronological sequence automatically.** 🎯

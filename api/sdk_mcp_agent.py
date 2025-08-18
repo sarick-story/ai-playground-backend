@@ -850,6 +850,7 @@ async def _run_agent_impl(
                                                     await queue.put({"done": True})
                                                     
                                                     # Return interrupt info for separate handling
+                                                    logger.info("fuck and love")
                                                     return {"status": "interrupted", "conversation_id": conversation_id, "interrupt_data": interrupt_info}
                                     
                                     elif isinstance(chunk, dict):

@@ -308,14 +308,12 @@ async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
             timeout=35.0  # 35 second timeout (slightly longer than resume timeout)
         )
         
-        # Create response payload
-        # Always use "resumed" status if the AI generated a response, 
-        # regardless of whether the tool was confirmed or cancelled
+        # Create simplified response payload
         response_payload = {
-            "status": "resumed",  # AI provided a response in both confirm/cancel cases
+            "status": result.get("status", "error"),
             "conversation_id": request.conversation_id,
-            "result": result,
-            "tool_confirmed": request.confirmed  # Track whether tool was actually executed
+            "message": result.get("message"),  # Simple message content
+            "tool_confirmed": request.confirmed
         }
         
         # Log response (simplified to avoid f-string complexity)
