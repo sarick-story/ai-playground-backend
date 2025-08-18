@@ -2,7 +2,7 @@
 # MCP imports removed - now using centralized get_or_create_mcp_tools()
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
-from .supervisor_agent_system import get_supervisor_or_create_supervisor, create_supervisor_system, load_fresh_mcp_tools
+from .supervisor_agent_system import get_supervisor_from_cache, create_supervisor_system
 import os
 import asyncio
 import asyncio.subprocess  # Import at the module level to avoid local variable issue
@@ -23,6 +23,7 @@ from web3 import Web3
 import signal
 import anyio
 import io
+from langgraph.checkpoint.memory import InMemorySaver
 
 load_dotenv()
 
@@ -461,7 +462,7 @@ async def _run_agent_impl(
     from mcp.client.stdio import stdio_client
 
     from langchain_mcp_adapters.tools import load_mcp_tools
-    from langgraph.prebuilt import create_react_agent
+
     """Implementation of run_agent with explicit task context."""
     try:
         server_path = os.environ.get("SDK_MCP_SERVER_PATH")
@@ -539,11 +540,7 @@ async def _run_agent_impl(
 
                     # Create agent with tools and message history
                     logger.info("Creating agent with tools and system prompt")
-                    supervisor = create_react_agent(
-                        model=model,
-                        tools=tools,
-                        prompt=system_prompt
-                    )
+                    supervisor = await create_supervisor_system(tools)
 
                     messages = message_history or [{"role": "user", "content": user_message}]
                     logger.info(f"Prepared {len(messages)} messages for the agent")
@@ -737,15 +734,14 @@ async def _run_agent_impl(
                             logger.info(f"🔍 INITIAL: No pre-existing state (expected): {e}")
                         
                         # Use astream with proper stream mode to handle interrupts
-                        logger.info(f"🔧 SUPERVISOR: Starting astream with {len(messages)} messages")
-                        logger.info(f"🔧 SUPERVISOR: Thread config: {thread_config}")
+                        
                         
                         final_result = None
                         chunk_count = 0
                         async for chunk in supervisor.astream(
                             {"messages": messages},
                             config=thread_config,
-                            stream_mode=["values", "updates"]
+                            stream_mode=["values", "updates"],
                         ):
                                     chunk_count += 1
                                     logger.info(f"🔧 SUPERVISOR CHUNK {chunk_count}: {type(chunk)}")

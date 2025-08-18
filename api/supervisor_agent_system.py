@@ -27,15 +27,6 @@ logger = logging.getLogger(__name__)
 # Global supervisor system cache
 GLOBAL_SUPERVISOR_SYSTEM = None
 
-# Global checkpointer and store for all conversations
-# Conversation isolation is handled through thread_id in config
-GLOBAL_CHECKPOINTER = InMemorySaver()
-GLOBAL_STORE = InMemoryStore()
-
-# Note: Consider using MemorySaver instead of InMemorySaver based on 
-# successful langgraph-mcp-agent implementation:
-# from langgraph.checkpoint.memory import MemorySaver
-# GLOBAL_CHECKPOINTER = MemorySaver()
 
 @tool
 def multiply(a: int, b: int) -> int:
@@ -114,13 +105,12 @@ def halt_on_risky_tools_math(state: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+mach_agent_checkpointer = InMemorySaver()
 
-# Global Math_agent instance - REQUIRED for proper interrupt handling
-# Using the same agent instance for both initial calls and resume operations
 Math_agent = create_react_agent(
     model="openai:gpt-5-mini",
     tools=[multiply],
-    checkpointer=GLOBAL_CHECKPOINTER,
+    checkpointer=mach_agent_checkpointer,
     post_model_hook=halt_on_risky_tools_math,
     version="v2",
 )
@@ -295,28 +285,14 @@ async def get_or_create_mcp_tools() -> List[Any]:
     return await load_fresh_mcp_tools()
 
 
-async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
+async def create_all_agents(mcp_tools):
     """Create all agents with properly loaded tools.
     
     Args:
-        checkpointer: Optional checkpointer for state persistence
-        store: Optional store for cross-thread memory
-        mcp_tools: Optional pre-loaded MCP tools to use instead of loading separately
+        mcp_tools: pre-loaded MCP tools
     """
-    # Load MCP tools with proper error handling
-    if mcp_tools:
-        # Use provided MCP tools directly - no wrapper needed
-        direct_tools = mcp_tools
-        logger.info(f"Using provided MCP tools: {len(direct_tools)} tools")
-    else:
-        # Load fresh MCP tools using LangGraph approach
-        try:
-            direct_tools = await load_fresh_mcp_tools()
-            logger.info(f"Loaded fresh MCP tools: {len(direct_tools)} tools")
-        except Exception as e:
-            logger.error(f"Failed to load MCP tools: {e}")
-            direct_tools = []
-            logger.warning("Continuing with empty tools list - agents will have limited functionality")
+
+    direct_tools = mcp_tools
     
     # Create tool collections using direct tools (maintain categorization for now)
     tool_collections = {
@@ -343,8 +319,6 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     IP_ASSET_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["ip_asset_tool"],
-        checkpointer=checkpointer,
-        store=store,
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
         prompt=(
@@ -364,8 +338,6 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     IP_ACCOUNT_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["ip_account_tool"],
-        checkpointer=checkpointer,
-        store=store,
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
         prompt=(
@@ -384,8 +356,6 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     IP_LICENSE_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["license_tool"],
-        checkpointer=checkpointer,
-        store=store,
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
         prompt=(
@@ -416,8 +386,6 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     NFT_CLIENT_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["nft_client_tool"],
-        checkpointer=checkpointer,
-        store=store,
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
         prompt=(
@@ -439,8 +407,6 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     DISPUTE_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["dispute_tool"],
-        checkpointer=checkpointer,
-        store=store,
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
         prompt=(
@@ -459,8 +425,6 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     GROUP_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["group_tool"],
-        checkpointer=checkpointer,
-        store=store,
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
         prompt=(
@@ -477,8 +441,6 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     PERMISSION_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["permission_tool"],
-        checkpointer=checkpointer,
-        store=store,
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
         prompt=(
@@ -495,8 +457,6 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     ROYALTY_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["royalty_tool"],
-        checkpointer=checkpointer,
-        store=store,
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
         prompt=(
@@ -515,8 +475,6 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     WIP_AGENT = create_react_agent(
         model="openai:gpt-4.1",
         tools=tool_collections["wip_tool"],
-        checkpointer=checkpointer,
-        store=store,
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
         prompt=(
@@ -544,21 +502,18 @@ async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     }
 
 
-async def create_supervisor_system(mcp_tools=None, checkpointer=None, store=None):
+async def create_supervisor_system(mcp_tools):
     """Create the complete supervisor system with all agents.
     
     Args:
-        mcp_tools: Optional pre-loaded MCP tools
-        checkpointer: Optional checkpointer (defaults to GLOBAL_CHECKPOINTER)
-        store: Optional store (defaults to GLOBAL_STORE)
+        mcp_tools: pre-loaded MCP tools
     """
-    
-    # Use provided or default checkpointer/store
-    checkpointer = checkpointer or GLOBAL_CHECKPOINTER
-    store = store or GLOBAL_STORE
+    global GLOBAL_SUPERVISOR_SYSTEM
+    checkpointer = InMemorySaver()
+    store = InMemoryStore()
     
     # Create all agents with loaded tools
-    agents = await create_all_agents(checkpointer=checkpointer, store=store, mcp_tools=mcp_tools)
+    agents = await create_all_agents(mcp_tools)
     
     # Create supervisor with all agents
     supervisor = create_supervisor(
@@ -587,34 +542,16 @@ async def create_supervisor_system(mcp_tools=None, checkpointer=None, store=None
         add_handoff_back_messages=True,
         output_mode="full_history",
     ).compile(checkpointer=checkpointer, store=store)
-    
-    return supervisor, agents
+
+    GLOBAL_SUPERVISOR_SYSTEM = supervisor
+ 
+    return supervisor
 
 
-async def get_supervisor_or_create_supervisor(mcp_tools):
-    """Get the supervisor system, creating it if not cached."""
-    global GLOBAL_SUPERVISOR_SYSTEM
-    if GLOBAL_SUPERVISOR_SYSTEM is None:
-        supervisor, agents = await create_supervisor_system(mcp_tools)
-        GLOBAL_SUPERVISOR_SYSTEM = {
-            "supervisor": supervisor,
-            "agents": agents
-        }
-    return GLOBAL_SUPERVISOR_SYSTEM["supervisor"]
+async def get_supervisor_from_cache():
+    """Get the supervisor system from cache"""
+    return GLOBAL_SUPERVISOR_SYSTEM
 
-async def get_agents_or_create_agents(mcp_tools):
-    """Get all agents, creating them if not cached."""
-    global GLOBAL_SUPERVISOR_SYSTEM
-    if GLOBAL_SUPERVISOR_SYSTEM is None:
-        supervisor, agents = await create_supervisor_system(mcp_tools)
-        GLOBAL_SUPERVISOR_SYSTEM = {
-            "supervisor": supervisor,
-            "agents": agents
-        }
-    return GLOBAL_SUPERVISOR_SYSTEM["agents"]
-
-# Track interrupted conversations
-_interrupted_conversations = {}
 
 def _serialize_langchain_objects(obj):
     """Recursively serialize LangChain objects and other complex objects to JSON-serializable format."""
@@ -705,14 +642,8 @@ async def resume_interrupted_conversation(
     try:
         # Use the SAME supervisor instance that was interrupted
         # Creating a new supervisor would lose the interrupted state!
-        supervisor = await get_supervisor_or_create_supervisor()
+        supervisor = await get_supervisor_from_cache()
         
-        # Log supervisor details
-        logger.info(f"🔍 RESUME: Using existing supervisor system instance for resume")
-        logger.info(f"🔍 RESUME: Checkpointer type: {type(supervisor.checkpointer).__name__}")
-        logger.info(f"🔍 RESUME: Checkpointer instance ID: {id(supervisor.checkpointer)}")
-        logger.info(f"🔍 RESUME: Store type: {type(supervisor.store).__name__}")
-        logger.info(f"🔍 RESUME: Store instance ID: {id(supervisor.store)}")
         
         # Create thread config to resume from checkpoint
         thread_config = {
@@ -722,50 +653,6 @@ async def resume_interrupted_conversation(
             }
         }
         logger.info(f"🔍 RESUME: Thread config: {thread_config}")
-        
-        # **CRITICAL STEP**: Check if checkpoint state exists before attempting resume
-        try:
-            logger.info(f"🔍 RESUME: Checking checkpoint state before resume...")
-            state = await supervisor.aget_state(thread_config)
-            logger.info(f"🔍 RESUME: Checkpoint state found: {state is not None}")
-            
-            if state:
-                logger.info(f"🔍 RESUME: State object type: {type(state)}")
-                if hasattr(state, 'values'):
-                    logger.info(f"🔍 RESUME: State values keys: {list(state.values.keys())}")
-                    if 'messages' in state.values:
-                        messages = state.values['messages']
-                        logger.info(f"🔍 RESUME: Found {len(messages)} messages in checkpoint")
-                        # Log last few messages for context
-                        for i, msg in enumerate(messages[-2:], 1):
-                            msg_type = type(msg).__name__
-                            content_preview = str(msg.content)[:50] if hasattr(msg, 'content') else 'no content'
-                            logger.info(f"🔍 RESUME: Message {i}: {msg_type} - {content_preview}...")
-                    else:
-                        logger.error(f"🔍 RESUME: ❌ CRITICAL ERROR: No 'messages' key in checkpoint state!")
-                        logger.info(f"🔍 RESUME: Available keys: {list(state.values.keys())}")
-                else:
-                    logger.error(f"🔍 RESUME: ❌ CRITICAL ERROR: State has no 'values' attribute!")
-                    logger.info(f"🔍 RESUME: State attributes: {dir(state)}")
-                    
-                # Also check for interrupts in the state
-                if hasattr(state, 'values') and '__interrupt__' in state.values:
-                    interrupts = state.values['__interrupt__']
-                    logger.info(f"🔍 RESUME: Found {len(interrupts) if interrupts else 0} interrupts in checkpoint")
-                else:
-                    logger.info(f"🔍 RESUME: No interrupts found in checkpoint state")
-                    
-            else:
-                logger.error(f"🔍 RESUME: ❌ CRITICAL ERROR: No checkpoint state found for thread {conversation_id}!")
-                return {"status": "error", "error": f"No checkpoint state found for conversation {conversation_id}"}
-                
-        except Exception as checkpoint_error:
-            logger.error(f"🔍 RESUME: ❌ Error getting checkpoint state: {checkpoint_error}")
-            logger.error(f"🔍 RESUME: Checkpoint error traceback: {traceback.format_exc()}")
-        
-        # Resume the graph execution using proper Command pattern with timeout
-        logger.info(f"🔄 RESUME START: Command(resume={confirmed}) for {conversation_id}")
-        logger.info(f"🔄 About to call supervisor.ainvoke with Command(resume={confirmed})")
         
         result = await asyncio.wait_for(
             supervisor.ainvoke(
