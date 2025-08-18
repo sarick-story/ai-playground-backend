@@ -269,8 +269,6 @@ async def handle_transaction(request: TransactionRequest):
 # Track ongoing interrupt confirmations to prevent duplicates
 _active_confirmations = set()
 
-# Import test function for debugging
-from .supervisor_agent_system import test_mcp_tool_direct
 
 @app.post("/interrupt/confirm")
 async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
@@ -339,19 +337,5 @@ async def handle_interrupt_confirmation(request: InterruptConfirmationRequest):
         # Always remove from active set
         _active_confirmations.discard(confirmation_key)
 
-@app.post("/test/mcp-tool")
-async def test_mcp_tool(tool_name: str, tool_args: dict = {}):
-    """Test an MCP tool directly for debugging purposes."""
-    logger.info(f"🔧 TEST ENDPOINT: Testing {tool_name} with args: {tool_args}")
-    
-    try:
-        result = await test_mcp_tool_direct(tool_name, tool_args)
-        return JSONResponse(content={
-            "tool_name": tool_name,
-            "args": tool_args,
-            "result": result
-        })
-    except Exception as e:
-        logger.error(f"🔧 TEST ENDPOINT: Error testing tool {tool_name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
 

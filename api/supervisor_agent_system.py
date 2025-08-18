@@ -7,7 +7,7 @@ from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from typing import Optional, Tuple, List, Any, Dict
-# MCP imports are now done locally in load_fresh_mcp_tools to avoid import issues
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import interrupt
 from datetime import datetime
@@ -234,7 +234,7 @@ async def load_fresh_mcp_tools() -> List[Any]:
     
     # Create server parameters exactly like the documentation
     server_params = StdioServerParameters(
-        command=sys.executable,
+        command="python3",
         args=[server_path],
         env=env_vars
     )
@@ -250,6 +250,9 @@ async def load_fresh_mcp_tools() -> List[Any]:
             # Get tools
             logger.info("🔧 MCP: Loading tools...")
             tools = await load_mcp_tools(session)
+
+            supervisor, agents = await get_supervisor_or_create_supervisor()
+
             logger.info(f"🔧 MCP: Successfully loaded {len(tools)} tools using exact documentation pattern")
             
             # Log individual tool names if available
@@ -261,10 +264,6 @@ async def load_fresh_mcp_tools() -> List[Any]:
                 
             return tools
 
-async def cleanup_global_mcp_client():
-    """No cleanup needed with fresh MCP tools pattern."""
-    logger.info("🔧 MCP: No cleanup needed - using fresh tools each time")
-    pass
 
 
 def _find_mcp_server_path() -> str:
@@ -295,38 +294,6 @@ async def get_or_create_mcp_tools() -> List[Any]:
     """Legacy function name - redirects to load_fresh_mcp_tools for backward compatibility."""
     return await load_fresh_mcp_tools()
 
-
-
-
-async def test_mcp_tool_direct(tool_name: str, tool_args: dict) -> dict:
-    """Test an MCP tool directly for debugging purposes."""
-    logger.info(f"🔧 DIRECT TEST: Testing tool {tool_name} with args: {tool_args}")
-    
-    try:
-        tools = await get_or_create_mcp_tools()
-        target_tool = None
-        
-        for tool in tools:
-            if getattr(tool, 'name', '') == tool_name:
-                target_tool = tool
-                break
-        
-        if not target_tool:
-            logger.error(f"🔧 DIRECT TEST: Tool {tool_name} not found in available tools")
-            return {"error": f"Tool {tool_name} not found"}
-        
-        logger.info(f"🔧 DIRECT TEST: Found tool {tool_name}, attempting invoke...")
-        
-        # Try to invoke the tool directly
-        result = await target_tool.ainvoke(tool_args)
-        logger.info(f"🔧 DIRECT TEST: Tool {tool_name} succeeded: {result}")
-        return {"success": result}
-        
-    except Exception as e:
-        logger.error(f"🔧 DIRECT TEST: Tool {tool_name} failed: {e}")
-        import traceback
-        logger.error(f"🔧 DIRECT TEST: Full traceback: {traceback.format_exc()}")
-        return {"error": str(e)}
 
 async def create_all_agents(checkpointer=None, store=None, mcp_tools=None):
     """Create all agents with properly loaded tools.
@@ -585,9 +552,6 @@ async def create_supervisor_system(mcp_tools=None, checkpointer=None, store=None
         checkpointer: Optional checkpointer (defaults to GLOBAL_CHECKPOINTER)
         store: Optional store (defaults to GLOBAL_STORE)
     """
-    # Load MCP tools if not provided
-    if mcp_tools is None:
-        mcp_tools = await load_fresh_mcp_tools()
     
     # Use provided or default checkpointer/store
     checkpointer = checkpointer or GLOBAL_CHECKPOINTER
@@ -627,22 +591,22 @@ async def create_supervisor_system(mcp_tools=None, checkpointer=None, store=None
     return supervisor, agents
 
 
-async def get_supervisor_or_create_supervisor():
+async def get_supervisor_or_create_supervisor(mcp_tools):
     """Get the supervisor system, creating it if not cached."""
     global GLOBAL_SUPERVISOR_SYSTEM
     if GLOBAL_SUPERVISOR_SYSTEM is None:
-        supervisor, agents = await create_supervisor_system()
+        supervisor, agents = await create_supervisor_system(mcp_tools)
         GLOBAL_SUPERVISOR_SYSTEM = {
             "supervisor": supervisor,
             "agents": agents
         }
     return GLOBAL_SUPERVISOR_SYSTEM["supervisor"]
 
-async def get_agents_or_create_agents():
+async def get_agents_or_create_agents(mcp_tools):
     """Get all agents, creating them if not cached."""
     global GLOBAL_SUPERVISOR_SYSTEM
     if GLOBAL_SUPERVISOR_SYSTEM is None:
-        supervisor, agents = await create_supervisor_system()
+        supervisor, agents = await create_supervisor_system(mcp_tools)
         GLOBAL_SUPERVISOR_SYSTEM = {
             "supervisor": supervisor,
             "agents": agents
