@@ -1,7 +1,7 @@
 # Create server parameters for stdio connection
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
-from .supervisor_agent_system import get_supervisor_from_cache, create_supervisor_system
+from .supervisor_agent_system import get_supervisor_from_cache, get_or_create_supervisor_system
 from .stateless_mcp_tools_wrapper import create_stateless_mcp_tools
 import os
 import asyncio
@@ -24,6 +24,8 @@ import signal
 import anyio
 import io
 from langgraph.checkpoint.memory import InMemorySaver
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
 
 load_dotenv()
 
@@ -338,8 +340,7 @@ async def run_agent(
     user_message: str,
     wallet_address: Optional[str] = None,
     queue: Optional[asyncio.Queue] = None,
-    conversation_id: Optional[str] = None,
-    message_history: Optional[List[Dict[str, str]]] = None
+    conversation_id: Optional[str] = None
 ):
     """Run the SDK MCP agent with the given user message."""
     logger.info(f"Starting SDK MCP agent with message: {user_message}")
@@ -431,7 +432,6 @@ async def run_agent(
             wallet_address=wallet_address,
             queue=queue,
             conversation_id=conversation_id,
-            message_history=message_history,
             task_token=task_token
         )
         return result
@@ -451,7 +451,6 @@ async def _run_agent_impl(
     wallet_address: Optional[str] = None,
     queue: Optional[asyncio.Queue] = None,
     conversation_id: Optional[str] = None,
-    message_history: Optional[List[Dict[str, str]]] = None,
     task_token: str = ""
 ):
     """Implementation of run_agent with explicit task context using stateless MCP tools."""
@@ -478,12 +477,13 @@ async def _run_agent_impl(
         if wallet_address:
             logger.info(f"Using wallet address: {wallet_address}")
 
-        # Create agent with tools and message history
+        # Create agent with tools
         logger.info("Creating supervisor system with stateless MCP tools")
-        supervisor = await create_supervisor_system(tools)
+        supervisor = await get_or_create_supervisor_system(mcp_tools = tools, conversation_id = conversation_id)
 
-        messages = message_history or [{"role": "user", "content": user_message}]
-        logger.info(f"Prepared {len(messages)} messages for the agent")
+        # Create LangChain HumanMessage from user input - LangGraph will handle conversation history
+        human_message = HumanMessage(content=user_message)
+        logger.info(f"Created HumanMessage: {user_message[:100]}...")
 
         if queue:
             # Define the streaming handler directly before using it
@@ -677,7 +677,7 @@ async def _run_agent_impl(
             final_result = None
             chunk_count = 0
             async for chunk in supervisor.astream(
-                {"messages": messages},
+                {"messages": [human_message]},
                 config=thread_config,
                 stream_mode=["values", "updates"],
             ):
@@ -846,7 +846,7 @@ async def _run_agent_impl(
             
             try:
                 result = await supervisor.ainvoke(
-                    {"messages": messages},
+                    {"messages": [human_message]},
                     config=thread_config
                 )
                 logger.info("Supervisor system completed execution without streaming")
@@ -869,8 +869,7 @@ async def _run_agent_impl(
 async def stream_agent_response(
     user_message: str,
     wallet_address: Optional[str] = None,
-    conversation_id: Optional[str] = None,
-    message_history: Optional[List[Dict[str, str]]] = None
+    conversation_id: Optional[str] = None
 ):
     """Stream the agent's response to the user message."""
     # Create a queue for the agent to stream responses
@@ -883,8 +882,7 @@ async def stream_agent_response(
             user_message,
             wallet_address=wallet_address,
             queue=queue,
-            conversation_id=conversation_id,
-            message_history=message_history
+            conversation_id=conversation_id
         )
     )
     

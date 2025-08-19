@@ -24,8 +24,8 @@ from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
 
-# Global supervisor system cache
-GLOBAL_SUPERVISOR_SYSTEM = None
+# Global supervisor systems cache (dict with conversation_id as key)
+GLOBAL_SUPERVISOR_SYSTEMS = {}
 
 
 @tool
@@ -193,68 +193,6 @@ def halt_on_risky_tools(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
-async def load_fresh_mcp_tools() -> List[Any]:
-    """Load MCP tools following the EXACT LangGraph documentation pattern."""
-    # Follow exact pattern from LangGraph documentation
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
-    from langchain_mcp_adapters.tools import load_mcp_tools
-    
-    logger.info("🔧 MCP: Following exact LangGraph documentation pattern")
-    
-    # Find server path
-    server_path = _find_mcp_server_path()
-    logger.info(f"🔧 MCP: Using server at: {server_path}")
-    
-    # Load environment variables
-    server_dir = os.path.dirname(server_path)
-    env_path = os.path.join(server_dir, '.env')
-    env_vars = os.environ.copy()
-    
-    if os.path.exists(env_path):
-        logger.info(f"🔧 MCP: Loading environment from {env_path}")
-        with open(env_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
-                    value = value.strip('"').strip("'")
-                    if '#' in value:
-                        value = value.split('#')[0].strip()
-                    env_vars[key] = value
-                    logger.info(f"🔧 MCP: Set {key}={value[:20]}...")
-    
-    # Create server parameters exactly like the documentation
-    server_params = StdioServerParameters(
-        command="python3",
-        args=[server_path],
-        env=env_vars
-    )
-    
-    # Follow EXACT async context manager pattern from documentation
-    logger.info("🔧 MCP: Using exact async with pattern from documentation")
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            # Initialize the connection
-            logger.info("🔧 MCP: Initializing connection...")
-            await session.initialize()
-            
-            # Get tools
-            logger.info("🔧 MCP: Loading tools...")
-            tools = await load_mcp_tools(session)
-
-            supervisor = await get_supervisor_from_cache()
-
-            logger.info(f"🔧 MCP: Successfully loaded {len(tools)} tools using exact documentation pattern")
-            
-            # Log individual tool names if available
-            if tools:
-                tool_names = [getattr(tool, 'name', str(tool)) for tool in tools[:5]]  # First 5 tools
-                logger.info(f"🔧 MCP: Tool names (first 5): {tool_names}")
-            else:
-                logger.warning("🔧 MCP: No tools loaded using documentation pattern")
-                
-            return tools
 
 
 
@@ -508,13 +446,22 @@ async def create_all_agents(mcp_tools):
     }
 
 
-async def create_supervisor_system(mcp_tools):
+async def get_or_create_supervisor_system(mcp_tools, conversation_id: str):
     """Create the complete supervisor system with all agents.
     
     Args:
         mcp_tools: pre-loaded MCP tools
+        conversation_id: unique identifier for the conversation
     """
-    global GLOBAL_SUPERVISOR_SYSTEM
+    global GLOBAL_SUPERVISOR_SYSTEMS
+    
+    # Check if supervisor already exists for this conversation_id
+    if conversation_id in GLOBAL_SUPERVISOR_SYSTEMS:
+        logger.info(f"🔧 SUPERVISOR: Returning cached supervisor for conversation {conversation_id}")
+        return GLOBAL_SUPERVISOR_SYSTEMS[conversation_id]
+    
+    logger.info(f"🔧 SUPERVISOR: Creating new supervisor for conversation {conversation_id}")
+    
     checkpointer = InMemorySaver()
     store = InMemoryStore()
     
@@ -549,14 +496,23 @@ async def create_supervisor_system(mcp_tools):
         output_mode="full_history",
     ).compile(checkpointer=checkpointer, store=store)
 
-    GLOBAL_SUPERVISOR_SYSTEM = supervisor
+    # Cache the supervisor for this conversation_id
+    GLOBAL_SUPERVISOR_SYSTEMS[conversation_id] = supervisor
+    logger.info(f"🔧 SUPERVISOR: Cached new supervisor for conversation {conversation_id}")
  
     return supervisor
 
 
-async def get_supervisor_from_cache():
-    """Get the supervisor system from cache"""
-    return GLOBAL_SUPERVISOR_SYSTEM
+async def get_supervisor_from_cache(conversation_id: str):
+    """Get the supervisor system from cache for a specific conversation"""
+    global GLOBAL_SUPERVISOR_SYSTEMS
+    
+    if conversation_id in GLOBAL_SUPERVISOR_SYSTEMS:
+        logger.info(f"🔧 CACHE: Retrieved supervisor for conversation {conversation_id}")
+        return GLOBAL_SUPERVISOR_SYSTEMS[conversation_id]
+    else:
+        logger.warning(f"🔧 CACHE: No supervisor found for conversation {conversation_id}")
+        return None
 
 
 def _serialize_langchain_objects(obj):
@@ -648,7 +604,7 @@ async def resume_interrupted_conversation(
     try:
         # Use the SAME supervisor instance that was interrupted
         # Creating a new supervisor would lose the interrupted state!
-        supervisor = await get_supervisor_from_cache()
+        supervisor = await get_supervisor_from_cache(conversation_id)
         
         
         # Create thread config to resume from checkpoint
@@ -659,6 +615,24 @@ async def resume_interrupted_conversation(
             }
         }
         logger.info(f"🔍 RESUME: Thread config: {thread_config}")
+        
+        # Log pre-resume state
+        try:
+            pre_state = await supervisor.aget_state(thread_config)
+            logger.info(f"🔍 PRE-RESUME: State exists: {pre_state is not None}")
+            if pre_state and hasattr(pre_state, 'values') and 'messages' in pre_state.values:
+                pre_messages = pre_state.values['messages']
+                logger.info(f"🔍 PRE-RESUME: Found {len(pre_messages)} messages in state")
+                for i, msg in enumerate(pre_messages[-3:]):
+                    msg_type = type(msg).__name__
+                    msg_content = getattr(msg, 'content', 'no content')[:100]
+                    logger.info(f"🔍 PRE-RESUME: Message {i}: {msg_type} - {msg_content}...")
+            else:
+                logger.info(f"🔍 PRE-RESUME: No pre-existing messages in state")
+        except Exception as e:
+            logger.info(f"🔍 PRE-RESUME: Error checking pre-state: {e}")
+
+        logger.info(f"🔄 RESUMING with Command(resume={confirmed}) for conversation {conversation_id}")
         
         result = await asyncio.wait_for(
             supervisor.ainvoke(
@@ -676,36 +650,90 @@ async def resume_interrupted_conversation(
         if isinstance(result, dict) and 'messages' in result:
             messages = result['messages']
             logger.info(f"🔄 Found {len(messages)} messages in result")
-            for i, msg in enumerate(messages[-3:]):  # Log last 3 messages
-                logger.info(f"🔄 Message {i}: {type(msg)} - {str(msg)[:100]}...")
+            logger.info(f"🔄 DETAILED MESSAGE ANALYSIS:")
+            for i, msg in enumerate(messages):
+                msg_type = type(msg).__name__
+                msg_content = getattr(msg, 'content', 'no content')
+                msg_role = getattr(msg, 'role', 'no role')
+                
+                # Special analysis for the last few messages
+                if i >= len(messages) - 5:  # Last 5 messages
+                    logger.info(f"🔄 Message {i} ({msg_type}): Role='{msg_role}', Content='{msg_content}'")
+                    
+                    # Extra analysis for AI messages
+                    if 'AI' in msg_type:
+                        content_length = len(msg_content) if isinstance(msg_content, str) else 0
+                        is_empty = not msg_content or (isinstance(msg_content, str) and not msg_content.strip())
+                        logger.info(f"🔄   AI MESSAGE DETAILS: Length={content_length}, IsEmpty={is_empty}, Content='{repr(msg_content)}'")
+                        
+                        # Check for tool calls
+                        if hasattr(msg, 'tool_calls'):
+                            tool_calls = getattr(msg, 'tool_calls', [])
+                            logger.info(f"🔄   TOOL CALLS: {len(tool_calls)} tool calls")
+                            for tc in tool_calls:
+                                logger.info(f"🔄     Tool: {tc.get('name', 'unknown')} - Args: {tc.get('args', {})}")
+                    
+                    # Extra analysis for Tool messages
+                    elif 'Tool' in msg_type:
+                        logger.info(f"🔄   TOOL MESSAGE: Content='{msg_content}'")
         else:
             logger.info(f"🔄 No messages found in result: {str(result)[:200]}...")
         
         # Extract only the last AI message content - no complex serialization needed
         last_ai_content = None
+        last_ai_message_found = False
         if isinstance(result, dict) and 'messages' in result:
             messages = result['messages']
+            logger.info(f"🔍 EXTRACTION: Looking for last AI message in {len(messages)} total messages")
+            
             # Find the last AI message
-            for msg in reversed(messages):
+            for i, msg in enumerate(reversed(messages)):
+                msg_type = type(msg).__name__
+                logger.info(f"🔍 EXTRACTION: Checking message {len(messages)-1-i}: {msg_type}")
+                
                 if hasattr(msg, '__class__') and 'AI' in msg.__class__.__name__:
+                    logger.info(f"🔍 EXTRACTION: Found AI message at position {len(messages)-1-i}")
+                    last_ai_message_found = True
+                    
                     if hasattr(msg, 'content'):
                         last_ai_content = msg.content
+                        content_repr = repr(last_ai_content)
+                        content_length = len(last_ai_content) if isinstance(last_ai_content, str) else 0
+                        is_empty = not last_ai_content or (isinstance(last_ai_content, str) and not last_ai_content.strip())
+                        
+                        logger.info(f"🔍 EXTRACTION: AI content extracted")
+                        logger.info(f"🔍 EXTRACTION:   Type: {type(last_ai_content)}")
+                        logger.info(f"🔍 EXTRACTION:   Length: {content_length}")
+                        logger.info(f"🔍 EXTRACTION:   IsEmpty: {is_empty}")
+                        logger.info(f"🔍 EXTRACTION:   Content: {content_repr}")
+                        logger.info(f"🔍 EXTRACTION:   Content (first 200 chars): '{str(last_ai_content)[:200]}'")
+                    else:
+                        logger.info(f"🔍 EXTRACTION: AI message has no 'content' attribute")
                     break
+                    
+            if not last_ai_message_found:
+                logger.info(f"🔍 EXTRACTION: No AI messages found in result")
+        else:
+            logger.info(f"🔍 EXTRACTION: Result has no messages to extract from")
         
         if confirmed:
             logger.info(f"Conversation resumed successfully: {conversation_id}")
-            return {
+            response_payload = {
                 "status": "completed", 
                 "message": last_ai_content,
                 "conversation_id": conversation_id
             }
+            logger.info(f"🔍 FINAL_RESPONSE: Sending to frontend: {response_payload}")
+            return response_payload
         else:
             logger.info(f"Conversation cancelled by user: {conversation_id}")
-            return {
+            response_payload = {
                 "status": "cancelled", 
                 "message": last_ai_content,
                 "conversation_id": conversation_id
             }
+            logger.info(f"🔍 FINAL_RESPONSE: Sending to frontend: {response_payload}")
+            return response_payload
             
     except asyncio.TimeoutError:
         logger.error(f"Timeout resuming conversation {conversation_id} after 30 seconds")

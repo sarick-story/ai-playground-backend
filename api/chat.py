@@ -18,12 +18,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-class Message(BaseModel):
-    role: str
-    content: str
-
 class Request(BaseModel):
-    messages: List[Message]
+    message: str  # Single message string from user
     conversation_id: Optional[str] = None
     mcp_type: Optional[str] = "storyscan"  # Default to storyscan
     wallet_address: Optional[str] = None    # Wallet address for SDK operations
@@ -82,18 +78,15 @@ def parse_transaction_details(message: str) -> dict:
     return {"amount": "0", "to_address": "0x0"}
 
 async def stream_agent_response(
-    messages: List[Message], 
+    user_message: str, 
     conversation_id: Optional[str] = None,
     mcp_type: str = "storyscan",
     wallet_address: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
     """Stream the agent's response"""
-    # Get the last user message
-    last_message = messages[-1].content if messages and messages[-1].role == "user" else ""
+    logger.info(f"Processing user message with {mcp_type} MCP: {user_message[:50]}...")
     
-    logger.info(f"Processing user message with {mcp_type} MCP: {last_message[:50]}...")
-    
-    if not last_message:
+    if not user_message:
         logger.warning("No user message found")
         yield "No user message found.\n"
         return
@@ -104,28 +97,23 @@ async def stream_agent_response(
     # Start the agent task
     async def run_agent_task():
         try:
-            # Pass all messages to maintain conversation context
-            formatted_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
-            
             # Choose the appropriate agent based on mcp_type
             result = None
             if mcp_type == "sdk":
                 logger.info(f"Using SDK MCP agent with wallet: {wallet_address}")
                 result = await run_sdk_agent(
-                    last_message, 
+                    user_message, 
                     wallet_address=wallet_address,
                     queue=queue, 
-                    conversation_id=conversation_id, 
-                    message_history=formatted_messages
+                    conversation_id=conversation_id
                 )
             else:
                 # Default to blockscout/storyscan agent
                 logger.info("Using Storyscan MCP agent")
                 result = await run_blockscout_agent(
-                    last_message, 
+                    user_message, 
                     queue=queue, 
-                    conversation_id=conversation_id, 
-                    message_history=formatted_messages
+                    conversation_id=conversation_id
                 )
             
             # Handle interrupt responses properly
@@ -177,7 +165,7 @@ async def stream_agent_response(
 
 @app.post("/chat")
 async def handle_chat(request: Request, protocol: str = Query('data')):
-    logger.info(f"Received chat request with {len(request.messages)} messages")
+    logger.info(f"Received chat request with message: {request.message[:100]}...")
     logger.info(f"🔍 FRONTEND: Raw conversation_id from frontend: {repr(request.conversation_id)}")
     conversation_id = request.conversation_id or str(uuid.uuid4())
     logger.info(f"🔍 BACKEND: Using conversation_id: {conversation_id}")
@@ -186,13 +174,13 @@ async def handle_chat(request: Request, protocol: str = Query('data')):
     
     logger.info(f"Using MCP type: {mcp_type}, Wallet: {wallet_address or 'None'}")
     
-    # Get the last user message
-    last_message = request.messages[-1].content if request.messages and request.messages[-1].role == "user" else ""
+    # Use the single message directly
+    user_message = request.message
     
     # For SDK MCP: Quick check if this is a transaction request before running the full agent
-    if mcp_type == "sdk" and wallet_address and is_transaction_intent(last_message):
+    if mcp_type == "sdk" and wallet_address and is_transaction_intent(user_message):
         logger.info("Detected transaction intent in SDK MCP request")
-        tx_details = parse_transaction_details(last_message)
+        tx_details = parse_transaction_details(user_message)
         
         # Return a JSON response with transaction details
         return JSONResponse(content={
@@ -208,7 +196,7 @@ async def handle_chat(request: Request, protocol: str = Query('data')):
     # For regular messages, use streaming
     return StreamingResponse(
         stream_agent_response(
-            request.messages, 
+            user_message, 
             conversation_id,
             mcp_type,
             wallet_address
