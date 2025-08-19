@@ -132,7 +132,9 @@ RISKY_TOOLS = {
     "pay_royalty_on_behalf",
     "raise_dispute",
     "deposit_wip",
-    "transfer_wip"
+    "transfer_wip",
+    "upload_image_to_ipfs",
+    "create_ip_metadata"
 }
 
 
@@ -278,11 +280,6 @@ def _find_mcp_server_path() -> str:
     
     return server_path
 
-
-# Legacy function name for backward compatibility
-async def get_or_create_mcp_tools() -> List[Any]:
-    """Legacy function name - redirects to load_fresh_mcp_tools for backward compatibility."""
-    return await load_fresh_mcp_tools()
 
 
 async def create_all_agents(mcp_tools):
