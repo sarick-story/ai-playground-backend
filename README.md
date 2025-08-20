@@ -1,13 +1,58 @@
 # AI Playground Backend
 
-This is the backend for the AI Playground, providing APIs for the frontend to communicate with various AI models and services.
+This is the backend for the AI Playground, featuring a sophisticated **specialized multi-agent system** that provides intelligent routing, enhanced security, and seamless blockchain operations for Story Protocol.
 
-## Features
+## 🤖 Key Features
 
-- Integration with different MCPs (Model Context Protocols)
-- Support for Storyscan blockchain analytics
-- Support for Story SDK operations with wallet integration
-- Streaming responses for real-time interaction
+### **Specialized Multi-Agent Architecture**
+- **9 Specialized Agents**: Each agent focuses on specific Story Protocol domains with dedicated tool access
+  - `IP_ASSET_AGENT`: IP asset creation, registration, metadata, and IPFS operations
+  - `IP_ACCOUNT_AGENT`: ERC20 token management, balance checks, test token minting  
+  - `IP_LICENSE_AGENT`: License terms, token minting, and licensing workflows
+  - `NFT_CLIENT_AGENT`: SPG NFT collection creation and contract management
+  - `DISPUTE_AGENT`: Dispute raising and resolution processes
+  - `ROYALTY_AGENT`: Royalty payments and revenue claiming
+  - `WIP_AGENT`: Wrapped IP token operations (deposits, transfers)
+  - `GROUP_AGENT` & `PERMISSION_AGENT`: Future functionality placeholders
+
+### **Intelligent Supervisor System**
+- **Smart Request Routing**: Automatically routes user requests to the most appropriate specialist
+- **Sequential Coordination**: Manages complex multi-step workflows across agents
+- **Response Preservation**: Passes through specialist responses verbatim without modification
+- **Unified Interface**: Users interact with a single supervisor without knowing about individual agents
+
+### **Advanced Security & Confirmation System**
+- **Stateless MCP Sessions**: Reliable interrupt handling without persistent connection issues
+- **Transaction Safety**: Automatic confirmation requirements for blockchain operations
+- **User-Friendly Confirmations**: Enhanced parameter formatting for clear user understanding
+- **Risky Tool Detection**: Automated identification of sensitive operations requiring approval
+
+### **Enhanced Architecture**
+- **Backend Chat History**: All conversations stored using LangGraph checkpointer (InMemorySaver)
+- **Simplified Communication**: Frontend only sends latest user message, reducing complexity
+- **Improved Agent Prompts**: Enhanced prompting system for better agent behavior
+- **Tool Segregation**: Each agent has access only to relevant tools for their domain
+
+## 🏗️ System Architecture
+
+### **Multi-Agent Flow**
+1. **User Request** → **Supervisor Agent** analyzes and routes to appropriate specialist
+2. **Specialist Agent** executes domain-specific operations with dedicated tools
+3. **Interrupt System** triggers for sensitive blockchain operations requiring user confirmation
+4. **Frontend Confirmation** → User approves/rejects through intuitive popup interface
+5. **Resume Execution** → Agent continues or cancels based on user decision
+
+### **Key Components**
+- `supervisor_agent_system.py` - Multi-agent supervisor and coordination
+- `interrupt_handler.py` - Stateless interrupt system with user-friendly formatting  
+- `tool_categories.py` - Tool organization and access control
+- `sdk_mcp_agent.py` - Enhanced SDK agent with improved prompts
+- `chat.py` - Streaming chat API with interrupt handling
+
+### **Conversation State Management**
+- **Checkpointer**: LangGraph InMemorySaver maintains full conversation history
+- **Thread Safety**: Conversation-scoped supervisor instances prevent state conflicts
+- **Resume Capability**: Interrupted conversations can be resumed from exact checkpoint
 
 ## Prerequisites
 
