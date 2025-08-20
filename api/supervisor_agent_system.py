@@ -141,7 +141,8 @@ async def create_all_agents(mcp_tools):
             "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
             "- Always call one tool at a time\n"
             "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
-            "- If you don't have available tools, say so and ask the supervisor to assign a different agent\n\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent\n"
+            "- Don't need user approval for all tool start with 'get_', these tools are safe to call\n\n"
             
             "**IMPORTANT WORKFLOW FOR mint_and_register_ip_with_terms:**\n"
             "Before calling mint_and_register_ip_with_terms, you MUST follow this workflow:\n\n"
@@ -172,6 +173,8 @@ async def create_all_agents(mcp_tools):
             "User: \"Mint an IP asset\" (no specific contract = use default)\n"
             "1. Call: mint_and_register_ip_with_terms(..., spg_nft_contract_max_minting_fee=0, spg_nft_contract_mint_fee_token=\"0x1514000000000000000000000000000000000000\")"
             
+            
+            
         ),
         name="IP_ASSET_AGENT",
     )
@@ -193,6 +196,7 @@ async def create_all_agents(mcp_tools):
             "- Always call one tool at a time\n"
             "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
             "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
+            "- Don't need user approval for all tool start with 'get_', these tools are safe to call"
         ),
         name="IP_ACCOUNT_AGENT",
     )
@@ -215,6 +219,21 @@ async def create_all_agents(mcp_tools):
             "- Always call one tool at a time\n"
             "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
             "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
+            "- Don't need user approval for all tool start with 'get_', these tools are safe to call\n\n"
+            "**IMPORTANT Workflow for mint_license_tokens:**\n"
+            "Before calling mint_license_tokens, you MUST follow this workflow:\n\n"
+
+            "1. **Check License Terms Minting Parameters:**\n"
+            "   - First call predict_minting_license_fee to get the predicted minting fee\n"
+            "   - Second call get_license_revenue_share to get the license terms revenue share\n\n"
+
+            "2. **Set Hidden Parameters Based on Predicted Fee:**\n"
+            "   - Set max_minting_fee = the predicted minting fee\n"
+            "   - Set max_revenue_share = the license terms revenue share\n\n"
+
+            "3. **Execute mint_license_tokens:**\n"
+            "   - Use the exact values obtained/set in step 2 for the hidden parameters\n"
+            "   - These parameters ensure proper fee handling during the minting process\n"
         ),
         name="IP_LICENSE_AGENT",
     )
@@ -236,6 +255,7 @@ async def create_all_agents(mcp_tools):
             "- Always call one tool at a time\n"
             "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
             "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
+            "- Don't need user approval for all tool start with 'get_', these tools are safe to call"
         ),
         name="NFT_CLIENT_AGENT",
     )
@@ -257,6 +277,7 @@ async def create_all_agents(mcp_tools):
             "- Always call one tool at a time\n"
             "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
             "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
+            "- Don't need user approval for all tool start with 'get_', these tools are safe to call"
         ),
         name="DISPUTE_AGENT",
     )
@@ -277,6 +298,7 @@ async def create_all_agents(mcp_tools):
             "- Always call one tool at a time\n"
             "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
             "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
+            "- Don't need user approval for all tool start with 'get_', these tools are safe to call"
         ),
         name="GROUP_AGENT",
     )
@@ -297,6 +319,7 @@ async def create_all_agents(mcp_tools):
             "- Always call one tool at a time\n"
             "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
             "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
+            "- Don't need user approval for all tool start with 'get_', these tools are safe to call"
         ),
         name="PERMISSION_AGENT",
     )
@@ -318,6 +341,7 @@ async def create_all_agents(mcp_tools):
             "- Always call one tool at a time\n"
             "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
             "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
+            "- Don't need user approval for all tool start with 'get_', these tools are safe to call"
         ),
         name="ROYALTY_AGENT",
     )
@@ -339,6 +363,7 @@ async def create_all_agents(mcp_tools):
             "- Always call one tool at a time\n"
             "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
             "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
+            "- Don't need user approval for all tool start with 'get_', these tools are safe to call"
         ),
         name="WIP_AGENT",
     )
