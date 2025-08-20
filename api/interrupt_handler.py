@@ -132,6 +132,7 @@ def create_transaction_interrupt(
         transaction_type="blockchain_transaction",
         affects_balance=True
     )
+    parameters = add_optional_parameters_if_missing(tool_name, parameters)
     
     return create_standard_interrupt(
         tool_name=tool_name,
@@ -178,3 +179,115 @@ def create_fee_confirmation_interrupt(
         parameters=parameters,
         fee_info=fee_info
     )
+
+
+# MCP Tool Optional Parameters Dictionary
+MCP_TOOL_OPTIONAL_PARAMETERS = {
+    "upload_image_to_ipfs": {},
+    
+    "create_ip_metadata": {
+        "attributes": "None"
+    },
+    
+    "get_license_terms": {},
+    
+    "get_license_minting_fee": {},
+    
+    "get_license_revenue_share": {},
+    
+    "mint_license_tokens": {
+        "receiver": "your wallet", 
+        "amount": "1",
+        "max_minting_fee": "no limit",
+        "max_revenue_share": "no limit",
+        "license_template": "default template"
+    },
+    
+    "mint_and_register_ip_with_terms": {
+        "commercial_use": "True",
+        "minting_fee": "0",
+        "recipient": "your wallet",
+        "spg_nft_contract": "network default",
+        "spg_nft_contract_max_minting_fee": "no limit",
+        "spg_nft_contract_mint_fee_token": "auto detect"
+    },
+    
+    "create_spg_nft_collection": {
+        "is_public_minting": "True",
+        "mint_open": "True",
+        "mint_fee_recipient": "your wallet",
+        "contract_uri": "None",
+        "base_uri": "None",
+        "max_supply": "unlimited",
+        "mint_fee": "0",
+        "mint_fee_token": "WIP token",
+        "owner": "your wallet"
+    },
+    
+    "get_spg_nft_contract_minting_fee_and_token": {},
+    
+    "register": {
+        "ip_metadata": "None"
+    },
+    
+    "attach_license_terms": {
+        "license_template": "default template"
+    },
+    
+    "pay_royalty_on_behalf": {},
+    
+    "claim_all_revenue": {
+        "auto_transfer": "True",
+        "claimer": "your wallet"
+    },
+    
+    "raise_dispute": {
+        "liveness": "30 days"
+    },
+    
+    "deposit_wip": {},
+    
+    "get_erc20_token_balance": {
+        "account_address": "your wallet"
+    },
+    
+    "mint_test_erc20_tokens": {
+        "recipient": "your wallet"
+    },
+    
+    "transfer_wip": {},
+    
+    "predict_minting_license_fee": {
+        "license_template": "default template",
+        "receiver": "your wallet", 
+        "tx_options": "None"
+    }
+}
+
+
+def add_optional_parameters_if_missing(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Precheck function to add missing optional parameters to the parameters dict.
+    
+    Args:
+        tool_name: Name of the MCP tool
+        parameters: Current parameters dict
+        
+    Returns:
+        Updated parameters dict with missing optional parameters added
+    """
+    if tool_name not in MCP_TOOL_OPTIONAL_PARAMETERS:
+        return parameters
+    
+    # Get optional parameters for this tool
+    optional_params = MCP_TOOL_OPTIONAL_PARAMETERS[tool_name]
+    
+    # Create a copy of parameters to avoid modifying the original
+    updated_parameters = parameters.copy()
+    
+    # Add missing optional parameters
+    for param_name, default_description in optional_params.items():
+        if param_name not in updated_parameters:
+            updated_parameters[param_name] = default_description
+    
+    return updated_parameters

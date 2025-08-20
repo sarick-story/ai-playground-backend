@@ -1,7 +1,7 @@
 from langgraph.prebuilt import create_react_agent
 from .tools_wrapper import create_wrapped_tool_collections, create_wrapped_tool_collections_from_tools
 from .interrupt_handler import create_transaction_interrupt, send_standard_interrupt
-
+from .tool_categories import categorize_tools
 from langgraph_supervisor import create_supervisor
 from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
@@ -26,98 +26,6 @@ logger = logging.getLogger(__name__)
 
 # Global supervisor systems cache (dict with conversation_id as key)
 GLOBAL_SUPERVISOR_SYSTEMS = {}
-
-
-@tool
-def multiply(a: int, b: int) -> int:
-    """
-    Multiply two numbers together.
-
-    Args:
-        a: The first number to multiply
-        b: The second number to multiply
-
-    Returns:
-        The product of the two numbers
-    """
-    return a * b
-
-RISKY_TOOLS_MATH = {
-    "multiply"
-}
-
-def halt_on_risky_tools_math(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Post-model hook to interrupt on risky tool calls using standardized format."""
-    messages = state.get("messages", [])
-    logger.info(f"🔍 POST_HOOK: Called with {len(messages)} messages in state")
-    logger.info(f"🔍 POST_HOOK: State keys: {list(state.keys())}")
-    
-    if not messages:
-        logger.info("🔍 POST_HOOK: No messages, returning empty")
-        return {}
-        
-    last = messages[-1]
-    logger.info(f"🔍 POST_HOOK: Last message type: {type(last).__name__}")
-    
-    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-        logger.info(f"🔍 POST_HOOK: Found {len(last.tool_calls)} tool calls")
-        for tc in last.tool_calls:
-            tool_name = tc.get("name", "")
-            logger.info(f"🔍 POST_HOOK: Processing tool call: {tool_name}")
-            if tool_name in RISKY_TOOLS_MATH:
-                # Get tool arguments
-                tool_args = tc.get("args", {})
-                
-                logger.info(f"🔍 PRE-INTERRUPT: State has {len(messages)} messages before interrupt")
-                logger.info(f"🔍 PRE-INTERRUPT: Tool args: {tool_args}")
-                logger.info(f"🔍 PRE-INTERRUPT: Tool call ID: {tc.get('id', 'unknown')}")
-                
-                # Create standardized interrupt using interrupt_handler
-                interrupt_msg = create_transaction_interrupt(
-                    tool_name=tool_name,
-                    operation=f"Execute {tool_name}",
-                    parameters=tool_args,
-                    network="Story Protocol"
-                )
-                
-                # Send interrupt with proper format
-                logger.info(f"fuck interrupt")
-                response = send_standard_interrupt(interrupt_msg)
-
-                logger.info(f"love resume")
-                logger.info(f"🔍 POST-INTERRUPT: Resume response: {response}")
-
-                if response:
-                    logger.info(f"confirmed = True")
-                    logger.info(f"🔍 CONFIRMED: Tool {tool_name} approved, allowing execution")
-                    return {}
-                logger.info(f"confirmed = False")
-                logger.info(f"🔍 CANCELLED: Tool {tool_name} cancelled, injecting cancel message")
-                tool_messages = ToolMessage(
-                    content="Cancelled by human. Continue without executing that tool and provide next step.",
-                    tool_call_id=tc["id"],
-                    name=tool_name
-                )
-                
-                return {"messages": [tool_messages]}
-    
-    logger.info("🔍 POST_HOOK: No risky tools found, continuing")
-    return {}
-
-
-mach_agent_checkpointer = InMemorySaver()
-
-Math_agent = create_react_agent(
-    model="openai:gpt-5-mini",
-    tools=[multiply],
-    checkpointer=mach_agent_checkpointer,
-    post_model_hook=halt_on_risky_tools_math,
-    version="v2",
-)
-
-
-
-
 
 
 
@@ -164,7 +72,7 @@ def halt_on_risky_tools(state: Dict[str, Any]) -> Dict[str, Any]:
                     tool_name=tool_name,
                     operation=f"Execute {tool_name}",
                     parameters=tool_args,
-                    network="Story Protocol"
+                    network="Story Testnet"
                 )
                 
                 # Send interrupt with proper format
@@ -230,17 +138,8 @@ async def create_all_agents(mcp_tools):
     direct_tools = mcp_tools
     
     # Create tool collections using direct tools (maintain categorization for now)
-    tool_collections = {
-        "ip_asset_tool": direct_tools,      # All agents get access to all tools
-        "ip_account_tool": direct_tools,    # This allows flexible routing and
-        "license_tool": direct_tools,       # eliminates the need for complex
-        "nft_client_tool": direct_tools,    # tool categorization logic
-        "dispute_tool": direct_tools,
-        "group_tool": direct_tools,
-        "permission_tool": direct_tools,
-        "royalty_tool": direct_tools,
-        "wip_tool": direct_tools
-    }
+
+    tool_collections = categorize_tools(mcp_tools)
     
     # Debug log the tool assignment
     logger.info(f"🔧 AGENT TOOLS: Assigning {len(direct_tools)} tools to each agent")
@@ -252,7 +151,7 @@ async def create_all_agents(mcp_tools):
     
     # Create IP Asset Agent
     IP_ASSET_AGENT = create_react_agent(
-        model="openai:gpt-4.1",
+        model="openai:gpt-4o-mini",
         tools=tool_collections["ip_asset_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -264,15 +163,47 @@ async def create_all_agents(mcp_tools):
             "- Use register for registering existing NFTs as IP assets\n"
             "- Handle IPFS uploads and metadata creation\n"
             "- After completing tasks, respond to the supervisor with results\n"
-            "- Be precise and include transaction details in responses"
-            "- Please provide the optional parameters for the tool calls to user"
+            "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
+            "- Always call one tool at a time\n"
+            "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent\n\n"
+            
+            "**IMPORTANT WORKFLOW FOR mint_and_register_ip_with_terms:**\n"
+            "Before calling mint_and_register_ip_with_terms, you MUST follow this workflow:\n\n"
+            
+            "1. **Check SPG Contract Minting Parameters:**\n"
+            "   - First call get_spg_nft_contract_minting_fee_and_token to get the contract's minting fee and token\n"
+            "   - This will return the minting_fee and minting_token for the specified SPG NFT contract\n\n"
+            
+            "2. **Set Hidden Parameters Based on Contract Type:**\n\n"
+            "   **Option A: If user provides a specific spg_nft_contract address:**\n"
+            "   - Set spg_nft_contract_max_minting_fee = the minting_fee from step 1\n"
+            "   - Set spg_nft_contract_mint_fee_token = the minting_token from step 1\n\n"
+            
+            "   **Option B: If user leaves spg_nft_contract blank (using default):**\n"
+            "   - Set spg_nft_contract_max_minting_fee = 0\n"
+            "   - Set spg_nft_contract_mint_fee_token = \"0x1514000000000000000000000000000000000000\"\n\n"
+            
+            "3. **Execute mint_and_register_ip_with_terms:**\n"
+            "   - Use the exact values obtained/set in step 2 for the hidden parameters\n"
+            "   - These parameters ensure proper fee handling during the minting process\n\n"
+            
+            "**Example Workflow:**\n"
+            "User: \"Mint an IP asset with SPG contract 0x123...\"\n"
+            "1. Call: get_spg_nft_contract_minting_fee_and_token(spg_nft_contract=\"0x123...\")\n"
+            "2. Get result: {minting_fee: 100000, minting_token: \"0xABC...\"}\n"
+            "3. Call: mint_and_register_ip_with_terms(..., spg_nft_contract_max_minting_fee=100000, spg_nft_contract_mint_fee_token=\"0xABC...\")\n\n"
+            
+            "User: \"Mint an IP asset\" (no specific contract = use default)\n"
+            "1. Call: mint_and_register_ip_with_terms(..., spg_nft_contract_max_minting_fee=0, spg_nft_contract_mint_fee_token=\"0x1514000000000000000000000000000000000000\")"
+            
         ),
         name="IP_ASSET_AGENT",
     )
 
     # Create IP Account Agent  
     IP_ACCOUNT_AGENT = create_react_agent(
-        model="openai:gpt-4.1",
+        model="openai:gpt-4o-mini",
         tools=tool_collections["ip_account_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -283,15 +214,17 @@ async def create_all_agents(mcp_tools):
             "- Check token balances and mint test tokens when needed\n"
             "- Provide account status and token information\n"
             "- After completing tasks, respond to the supervisor with results\n"
-            "- Include specific balance amounts and token addresses"
-            "- Please provide the optional parameters for the tool calls to user"
+            "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
+            "- Always call one tool at a time\n"
+            "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
         ),
         name="IP_ACCOUNT_AGENT",
     )
 
     # Create License Agent
     IP_LICENSE_AGENT = create_react_agent(
-        model="openai:gpt-4.1",
+        model="openai:gpt-4o-mini",
         tools=tool_collections["license_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -303,8 +236,10 @@ async def create_all_agents(mcp_tools):
             "- Check license fees and revenue sharing before minting\n"
             "- Explain licensing implications to users\n"
             "- After completing tasks, respond to the supervisor with results\n"
-            "- Include license terms details and costs in responses"
-            "- Please provide the optional parameters for the tool calls to user"
+            "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
+            "- Always call one tool at a time\n"
+            "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
         ),
         name="IP_LICENSE_AGENT",
     )
@@ -322,7 +257,7 @@ async def create_all_agents(mcp_tools):
     logger.info(f"🔧 NFT_CLIENT_AGENT HAS create_spg_nft_collection: {has_spg_tool}")
     
     NFT_CLIENT_AGENT = create_react_agent(
-        model="openai:gpt-4.1",
+        model="openai:gpt-4o-mini",
         tools=tool_collections["nft_client_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -333,9 +268,10 @@ async def create_all_agents(mcp_tools):
             "- Check SPG contract minting fees and tokens\n"
             "- Configure collection parameters (mint fees, tokens, settings)\n"
             "- After completing tasks, respond to the supervisor with results\n"
-            "- Include collection addresses and fee information\n"
-            "- If a tool fails, provide detailed error information to help with debugging"
-            "- Please provide the optional parameters for the tool calls to user"
+            "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
+            "- Always call one tool at a time\n"
+            "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
         ),
         name="NFT_CLIENT_AGENT",
     )
@@ -344,7 +280,7 @@ async def create_all_agents(mcp_tools):
 
     # Create Dispute Agent
     DISPUTE_AGENT = create_react_agent(
-        model="openai:gpt-4.1",
+        model="openai:gpt-4o-mini",
         tools=tool_collections["dispute_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -355,15 +291,17 @@ async def create_all_agents(mcp_tools):
             "- Explain dispute processes and requirements\n"
             "- Process dispute bonds and evidence\n"
             "- After completing tasks, respond to the supervisor with results\n"
-            "- Include dispute IDs and bond amounts in responses"
-            "- Please provide the optional parameters for the tool calls to user"
+            "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
+            "- Always call one tool at a time\n"
+            "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
         ),
         name="DISPUTE_AGENT",
     )
 
     # Create Group Agent (placeholder for future group operations)
     GROUP_AGENT = create_react_agent(
-        model="openai:gpt-4.1",
+        model="openai:gpt-4o-mini",
         tools=tool_collections["group_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -372,15 +310,18 @@ async def create_all_agents(mcp_tools):
             "INSTRUCTIONS:\n"
             "- Handle group-related operations (currently no tools available)\n"
             "- Inform users about group functionality status\n"
-            "- After completing tasks, respond to the supervisor with results"
-            "- Please provide the optional parameters for the tool calls to user"
+            "- After completing tasks, respond to the supervisor with results\n"
+            "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
+            "- Always call one tool at a time\n"
+            "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
         ),
         name="GROUP_AGENT",
     )
 
     # Create Permission Agent (placeholder for future permission operations)
     PERMISSION_AGENT = create_react_agent(
-        model="openai:gpt-4.1",
+        model="openai:gpt-4o-mini",
         tools=tool_collections["permission_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -389,15 +330,18 @@ async def create_all_agents(mcp_tools):
             "INSTRUCTIONS:\n"
             "- Handle permission-related operations (currently no tools available)\n"
             "- Inform users about permission functionality status\n"
-            "- After completing tasks, respond to the supervisor with results"
-            "- Please provide the optional parameters for the tool calls to user"
+            "- After completing tasks, respond to the supervisor with results\n"
+            "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
+            "- Always call one tool at a time\n"
+            "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
         ),
         name="PERMISSION_AGENT",
     )
 
     # Create Royalty Agent
     ROYALTY_AGENT = create_react_agent(
-        model="openai:gpt-4.1",
+        model="openai:gpt-4o-mini",
         tools=tool_collections["royalty_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -408,15 +352,17 @@ async def create_all_agents(mcp_tools):
             "- Claim revenue from child IPs for ancestor IPs\n"
             "- Calculate and process royalty distributions\n"
             "- After completing tasks, respond to the supervisor with results\n"
-            "- Include payment amounts and recipient details"
-            "- Please provide the optional parameters for the tool calls to user"
+            "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
+            "- Always call one tool at a time\n"
+            "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
         ),
         name="ROYALTY_AGENT",
     )
 
     # Create WIP Agent  
     WIP_AGENT = create_react_agent(
-        model="openai:gpt-4.1",
+        model="openai:gpt-4o-mini",
         tools=tool_collections["wip_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -427,8 +373,10 @@ async def create_all_agents(mcp_tools):
             "- Transfer WIP tokens between addresses\n"
             "- Explain WIP token mechanics and benefits\n"
             "- After completing tasks, respond to the supervisor with results\n"
-            "- Include transaction hashes and token amounts"
-            "- Please provide the optional parameters for the tool calls to user"
+            "- Please always show the exact result of the tool return, do not summarize or miss any information\n"
+            "- Always call one tool at a time\n"
+            "- Please always confirm the parameters of the tool call with the user before calling the tool\n"
+            "- If you don't have available tools, say so and ask the supervisor to assign a different agent"
         ),
         name="WIP_AGENT",
     )
@@ -473,24 +421,74 @@ async def get_or_create_supervisor_system(mcp_tools, conversation_id: str):
         model=init_chat_model("openai:gpt-4.1"),
         agents=list(agents.values()),
         prompt=(
-            "You are a supervisor managing Story Protocol specialized agents:\n\n"
-            "AVAILABLE AGENTS:\n"
-            "- IP_ASSET_AGENT: Creates, registers IP assets, handles metadata and IPFS\n"
-            "- IP_ACCOUNT_AGENT: Manages ERC20 tokens, checks balances, mints test tokens\n"
-            "- IP_LICENSE_AGENT: Handles licensing, mints license tokens, attaches terms\n"
-            "- NFT_CLIENT_AGENT: Creates SPG collections, manages contract fees\n"
-            "- DISPUTE_AGENT: Raises disputes, handles dispute processes\n"
-            "- ROYALTY_AGENT: Processes royalty payments, claims revenue\n"
-            "- WIP_AGENT: Handles WIP token operations (wrapping, transfers)\n"
-            "- GROUP_AGENT: Group operations (limited functionality)\n"
-            "- PERMISSION_AGENT: Permission management (limited functionality)\n\n"
-            "INSTRUCTIONS:\n"
-            "- Analyze user requests and route to the most appropriate specialist agent\n"
-            "- Assign work to ONE agent at a time, do not call agents in parallel\n"
-            "- For complex workflows, coordinate between agents sequentially\n"
-            "- Do not perform any Story Protocol operations yourself\n"
-            "- If one agent is not able to handle the request, hand off to the next agent\n"
-            "- The user is not aware of the different specialized agent assistants, so do not mention them\n"
+            """
+            You are a supervisor managing Story Protocol specialized agents.    
+            Only handle actions or questions related to Story Protocol IP management, NFT operations, royalties, disputes, IPFS & Metadata, permissions, the tools provided, and blockchain related questions.
+
+            
+            **🚨 CRITICAL RULE - SPECIALIST AGENT RESPONSES**:
+            When a specialist agent returns ANY response (especially tool results):
+            
+            1. **NEVER MODIFY, SUMMARIZE, OR PARAPHRASE** the specialist agent's response
+            2. **PASS THROUGH EXACTLY** what the specialist agent said
+            3. **PRESERVE ALL DETAILS** including:
+               - Transaction hashes, addresses, IDs
+               - Error messages and technical details  
+               - Numerical values, fees, amounts
+               - JSON objects, metadata, timestamps
+               - Formatting, spacing, and structure
+            
+            4. **FORBIDDEN ACTIONS**:
+               - ❌ "The agent successfully created..." (NO SUMMARIZING)
+               - ❌ "Here's a summary of the result..." (NO SUMMARIES)
+               - ❌ "The operation completed with..." (NO PARAPHRASING)
+               - ❌ Removing any part of the specialist's response
+               - ❌ Reformatting or restructuring the specialist's output
+            
+            5. **CORRECT APPROACH**:
+               - ✅ Copy the ENTIRE specialist agent response verbatim
+               - ✅ You may add brief introductory context BEFORE the response
+               - ✅ You may suggest next steps AFTER the complete response
+               - ✅ But the specialist's actual response must be 100% intact
+
+            
+            **❗ IMPORTANT BEHAVIORAL RULES**:
+            - The user is not aware of the different specialized agent assistants, so do not mention them by name
+            - Act as a unified interface - route requests but present results as if you performed them
+            - When specialists complete tasks, present their results directly without "The agent did X" language
+
+            
+            **🔧 AVAILABLE AGENTS**:
+            - IP_ASSET_AGENT: Creates, registers IP assets, handles metadata and IPFS
+            - IP_ACCOUNT_AGENT: Manages ERC20 tokens, checks balances, mints test tokens
+            - IP_LICENSE_AGENT: Handles licensing, mints license tokens, attaches terms
+            - NFT_CLIENT_AGENT: Creates SPG collections, manages contract fees
+            - DISPUTE_AGENT: Raises disputes, handles dispute processes
+            - ROYALTY_AGENT: Processes royalty payments, claims revenue
+            - WIP_AGENT: Handles WIP token operations (wrapping, transfers)
+            - GROUP_AGENT: Group operations (limited functionality)
+            - PERMISSION_AGENT: Permission management (limited functionality)
+
+            
+            **🌐 NETWORK INFORMATION:**
+            Remember the native token is $IP and wrapped version is WIP for transactions.
+            - Story Testnet (Aeneid): Chain ID 1315
+            - Explorer: https://aeneid.explorer.story.foundation
+
+            **💰 TOKEN ADDRESSES (ALWAYS use exact addresses, never token names):**
+            - WIP (Wrapped IP): 0x1514000000000000000000000000000000000000
+            - MERC20 (Test Token): 0xF2104833d386a2734a4eB3B8ad6FC6812F29E38E
+            IMPORTANT: When users say "WIP", "MERC20", or token names, always convert to the full address above.
+            
+            
+            **🔧 INSTRUCTIONS:**
+            - Analyze user requests and route to the most appropriate specialist agent
+            - Assign work to ONE agent at a time, do not call agents in parallel
+            - For complex workflows, coordinate between agents sequentially
+            - Do not perform any Story Protocol operations yourself
+            - If one agent is not able to handle the request, hand off to the next agent
+            - When presenting results, show the specialist's complete response without modification
+            """
         ),
         add_handoff_back_messages=True,
         output_mode="full_history",
@@ -743,3 +741,5 @@ async def resume_interrupted_conversation(
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return {"status": "error", "error": str(e)}
+    
+
