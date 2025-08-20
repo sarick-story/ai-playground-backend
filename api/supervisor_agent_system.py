@@ -1,35 +1,31 @@
-from langgraph.prebuilt import create_react_agent
-from .tools_wrapper import create_wrapped_tool_collections, create_wrapped_tool_collections_from_tools
-from .interrupt_handler import create_transaction_interrupt, send_standard_interrupt
-from .tool_categories import categorize_tools
-from langgraph_supervisor import create_supervisor
-from langchain.chat_models import init_chat_model
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.store.memory import InMemoryStore
-from typing import Optional, Tuple, List, Any, Dict
-
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.types import interrupt
-from datetime import datetime
-import uuid
+import asyncio
+import json
+import logging
 import os
 import sys
-import json
-import asyncio
 import time
 import traceback
+import uuid
 from asyncio import Queue, Lock
-import logging
+from datetime import datetime
+from typing import Optional, Tuple, List, Any, Dict
+
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, BaseMessage
 from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.prebuilt import create_react_agent
+from langgraph.store.memory import InMemoryStore
+from langgraph.types import interrupt, Command
+from langgraph_supervisor import create_supervisor
+
+from .interrupt_handler import create_transaction_interrupt, send_standard_interrupt
+from .tool_categories import categorize_tools
 
 logger = logging.getLogger(__name__)
 
 # Global supervisor systems cache (dict with conversation_id as key)
 GLOBAL_SUPERVISOR_SYSTEMS = {}
-
-
-
-
 
 # Define risky tools that require user confirmation
 RISKY_TOOLS = {
@@ -58,15 +54,7 @@ def halt_on_risky_tools(state: Dict[str, Any]) -> Dict[str, Any]:
             tool_name = tc.get("name", "")
             tool_args = tc.get("args", {})
             
-            # Enhanced debugging for all tool calls
-            logger.info(f"🔧 HOOK: Tool call detected: {tool_name}")
-            logger.info(f"🔧 HOOK: Tool args: {json.dumps(tool_args, indent=2)}")
-            logger.info(f"🔧 HOOK: Tool call ID: {tc.get('id', 'unknown')}")
-            logger.info(f"🔧 HOOK: Is risky tool: {tool_name in RISKY_TOOLS}")
-            
             if tool_name in RISKY_TOOLS:
-                logger.info(f"🔧 HOOK: RISKY TOOL DETECTED: {tool_name}")
-                
                 # Create standardized interrupt using interrupt_handler
                 interrupt_msg = create_transaction_interrupt(
                     tool_name=tool_name,
@@ -76,15 +64,10 @@ def halt_on_risky_tools(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 
                 # Send interrupt with proper format
-                logger.info(f"🔧 HOOK: Sending interrupt for {tool_name}")
                 response = send_standard_interrupt(interrupt_msg)
 
-                logger.info(f"🔧 HOOK: Interrupt response received")
-
                 if response:
-                    logger.info(f"🔧 HOOK: Tool {tool_name} confirmed = True")
                     return {}
-                logger.info(f"🔧 HOOK: Tool {tool_name} confirmed = False")
                 tool_messages = ToolMessage(
                     content="Cancelled by human. Continue without executing this tool.",
                     tool_call_id=tc["id"],
@@ -92,8 +75,6 @@ def halt_on_risky_tools(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 
                 return {"messages": [tool_messages]}
-            else:
-                logger.info(f"🔧 HOOK: Non-risky tool {tool_name}, allowing execution")
     
     return {}
 
@@ -141,17 +122,11 @@ async def create_all_agents(mcp_tools):
 
     tool_collections = categorize_tools(mcp_tools)
     
-    # Debug log the tool assignment
-    logger.info(f"🔧 AGENT TOOLS: Assigning {len(direct_tools)} tools to each agent")
-    if direct_tools:
-        sample_tool = direct_tools[0]
-        logger.info(f"🔧 SAMPLE TOOL: {getattr(sample_tool, 'name', 'unknown')} - {type(sample_tool)}")
-    else:
-        logger.warning("🔧 AGENT TOOLS: No tools available for agents!")
+
     
     # Create IP Asset Agent
     IP_ASSET_AGENT = create_react_agent(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-4.1",
         tools=tool_collections["ip_asset_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -203,7 +178,7 @@ async def create_all_agents(mcp_tools):
 
     # Create IP Account Agent  
     IP_ACCOUNT_AGENT = create_react_agent(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-4.1",
         tools=tool_collections["ip_account_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -224,7 +199,7 @@ async def create_all_agents(mcp_tools):
 
     # Create License Agent
     IP_LICENSE_AGENT = create_react_agent(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-4.1",
         tools=tool_collections["license_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -244,20 +219,9 @@ async def create_all_agents(mcp_tools):
         name="IP_LICENSE_AGENT",
     )
 
-    # Create NFT Client Agent with enhanced debugging
-    logger.info(f"🔧 CREATING NFT_CLIENT_AGENT with {len(tool_collections['nft_client_tool'])} tools")
-    
-    # Log specific tools available to NFT Client Agent
-    nft_tools = tool_collections["nft_client_tool"]
-    nft_tool_names = [getattr(tool, 'name', 'unnamed') for tool in nft_tools if hasattr(tool, 'name')]
-    logger.info(f"🔧 NFT_CLIENT_AGENT TOOLS: {nft_tool_names}")
-    
-    # Check for create_spg_nft_collection tool specifically
-    has_spg_tool = any(getattr(tool, 'name', '') == 'create_spg_nft_collection' for tool in nft_tools)
-    logger.info(f"🔧 NFT_CLIENT_AGENT HAS create_spg_nft_collection: {has_spg_tool}")
-    
+    # Create NFT Client Agent
     NFT_CLIENT_AGENT = create_react_agent(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-4.1",
         tools=tool_collections["nft_client_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -275,12 +239,10 @@ async def create_all_agents(mcp_tools):
         ),
         name="NFT_CLIENT_AGENT",
     )
-    
-    logger.info(f"🔧 NFT_CLIENT_AGENT CREATED SUCCESSFULLY")
 
     # Create Dispute Agent
     DISPUTE_AGENT = create_react_agent(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-4.1",
         tools=tool_collections["dispute_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -301,7 +263,7 @@ async def create_all_agents(mcp_tools):
 
     # Create Group Agent (placeholder for future group operations)
     GROUP_AGENT = create_react_agent(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-4.1",
         tools=tool_collections["group_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -321,7 +283,7 @@ async def create_all_agents(mcp_tools):
 
     # Create Permission Agent (placeholder for future permission operations)
     PERMISSION_AGENT = create_react_agent(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-4.1",
         tools=tool_collections["permission_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -341,7 +303,7 @@ async def create_all_agents(mcp_tools):
 
     # Create Royalty Agent
     ROYALTY_AGENT = create_react_agent(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-4.1",
         tools=tool_collections["royalty_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -362,7 +324,7 @@ async def create_all_agents(mcp_tools):
 
     # Create WIP Agent  
     WIP_AGENT = create_react_agent(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-4.1",
         tools=tool_collections["wip_tool"],
         version="v2",  # Use v2 for post_model_hook support
         post_model_hook=halt_on_risky_tools,  # Native interrupt handling
@@ -405,10 +367,7 @@ async def get_or_create_supervisor_system(mcp_tools, conversation_id: str):
     
     # Check if supervisor already exists for this conversation_id
     if conversation_id in GLOBAL_SUPERVISOR_SYSTEMS:
-        logger.info(f"🔧 SUPERVISOR: Returning cached supervisor for conversation {conversation_id}")
         return GLOBAL_SUPERVISOR_SYSTEMS[conversation_id]
-    
-    logger.info(f"🔧 SUPERVISOR: Creating new supervisor for conversation {conversation_id}")
     
     checkpointer = InMemorySaver()
     store = InMemoryStore()
@@ -496,8 +455,6 @@ async def get_or_create_supervisor_system(mcp_tools, conversation_id: str):
 
     # Cache the supervisor for this conversation_id
     GLOBAL_SUPERVISOR_SYSTEMS[conversation_id] = supervisor
-    logger.info(f"🔧 SUPERVISOR: Cached new supervisor for conversation {conversation_id}")
- 
     return supervisor
 
 
@@ -506,17 +463,13 @@ async def get_supervisor_from_cache(conversation_id: str):
     global GLOBAL_SUPERVISOR_SYSTEMS
     
     if conversation_id in GLOBAL_SUPERVISOR_SYSTEMS:
-        logger.info(f"🔧 CACHE: Retrieved supervisor for conversation {conversation_id}")
         return GLOBAL_SUPERVISOR_SYSTEMS[conversation_id]
     else:
-        logger.warning(f"🔧 CACHE: No supervisor found for conversation {conversation_id}")
         return None
 
 
 def _serialize_langchain_objects(obj):
     """Recursively serialize LangChain objects and other complex objects to JSON-serializable format."""
-    import json
-    from langchain_core.messages import BaseMessage
     
     # Handle None
     if obj is None:
@@ -590,15 +543,6 @@ async def resume_interrupted_conversation(
 ):
     """Resume an interrupted conversation after user confirmation."""
     
-    import logging
-    import asyncio
-    import traceback
-    from langgraph.types import Command
-    
-    logger = logging.getLogger(__name__)
-    
-    logger.info(f"🔍 RESUME: Starting resume for conversation {conversation_id} with confirmation: {confirmed}")
-    
     try:
         # Use the SAME supervisor instance that was interrupted
         # Creating a new supervisor would lose the interrupted state!
@@ -612,25 +556,6 @@ async def resume_interrupted_conversation(
                 "wallet_address": wallet_address
             }
         }
-        logger.info(f"🔍 RESUME: Thread config: {thread_config}")
-        
-        # Log pre-resume state
-        try:
-            pre_state = await supervisor.aget_state(thread_config)
-            logger.info(f"🔍 PRE-RESUME: State exists: {pre_state is not None}")
-            if pre_state and hasattr(pre_state, 'values') and 'messages' in pre_state.values:
-                pre_messages = pre_state.values['messages']
-                logger.info(f"🔍 PRE-RESUME: Found {len(pre_messages)} messages in state")
-                for i, msg in enumerate(pre_messages[-3:]):
-                    msg_type = type(msg).__name__
-                    msg_content = getattr(msg, 'content', 'no content')[:100]
-                    logger.info(f"🔍 PRE-RESUME: Message {i}: {msg_type} - {msg_content}...")
-            else:
-                logger.info(f"🔍 PRE-RESUME: No pre-existing messages in state")
-        except Exception as e:
-            logger.info(f"🔍 PRE-RESUME: Error checking pre-state: {e}")
-
-        logger.info(f"🔄 RESUMING with Command(resume={confirmed}) for conversation {conversation_id}")
         
         result = await asyncio.wait_for(
             supervisor.ainvoke(
@@ -640,106 +565,34 @@ async def resume_interrupted_conversation(
             timeout=30.0  # 30 second timeout
         )
         
-        logger.info(f"🔄 RESUME COMPLETED for {conversation_id}")
-        logger.info(f"🔄 Raw result type: {type(result)}")
-        logger.info(f"🔄 Raw result keys: {result.keys() if isinstance(result, dict) else 'N/A'}")
-        
-        # Log the messages if they exist
-        if isinstance(result, dict) and 'messages' in result:
-            messages = result['messages']
-            logger.info(f"🔄 Found {len(messages)} messages in result")
-            logger.info(f"🔄 DETAILED MESSAGE ANALYSIS:")
-            for i, msg in enumerate(messages):
-                msg_type = type(msg).__name__
-                msg_content = getattr(msg, 'content', 'no content')
-                msg_role = getattr(msg, 'role', 'no role')
-                
-                # Special analysis for the last few messages
-                if i >= len(messages) - 5:  # Last 5 messages
-                    logger.info(f"🔄 Message {i} ({msg_type}): Role='{msg_role}', Content='{msg_content}'")
-                    
-                    # Extra analysis for AI messages
-                    if 'AI' in msg_type:
-                        content_length = len(msg_content) if isinstance(msg_content, str) else 0
-                        is_empty = not msg_content or (isinstance(msg_content, str) and not msg_content.strip())
-                        logger.info(f"🔄   AI MESSAGE DETAILS: Length={content_length}, IsEmpty={is_empty}, Content='{repr(msg_content)}'")
-                        
-                        # Check for tool calls
-                        if hasattr(msg, 'tool_calls'):
-                            tool_calls = getattr(msg, 'tool_calls', [])
-                            logger.info(f"🔄   TOOL CALLS: {len(tool_calls)} tool calls")
-                            for tc in tool_calls:
-                                logger.info(f"🔄     Tool: {tc.get('name', 'unknown')} - Args: {tc.get('args', {})}")
-                    
-                    # Extra analysis for Tool messages
-                    elif 'Tool' in msg_type:
-                        logger.info(f"🔄   TOOL MESSAGE: Content='{msg_content}'")
-        else:
-            logger.info(f"🔄 No messages found in result: {str(result)[:200]}...")
-        
-        # Extract only the last AI message content - no complex serialization needed
+        # Extract only the last AI message content
         last_ai_content = None
-        last_ai_message_found = False
         if isinstance(result, dict) and 'messages' in result:
             messages = result['messages']
-            logger.info(f"🔍 EXTRACTION: Looking for last AI message in {len(messages)} total messages")
             
             # Find the last AI message
-            for i, msg in enumerate(reversed(messages)):
-                msg_type = type(msg).__name__
-                logger.info(f"🔍 EXTRACTION: Checking message {len(messages)-1-i}: {msg_type}")
-                
+            for msg in reversed(messages):
                 if hasattr(msg, '__class__') and 'AI' in msg.__class__.__name__:
-                    logger.info(f"🔍 EXTRACTION: Found AI message at position {len(messages)-1-i}")
-                    last_ai_message_found = True
-                    
                     if hasattr(msg, 'content'):
                         last_ai_content = msg.content
-                        content_repr = repr(last_ai_content)
-                        content_length = len(last_ai_content) if isinstance(last_ai_content, str) else 0
-                        is_empty = not last_ai_content or (isinstance(last_ai_content, str) and not last_ai_content.strip())
-                        
-                        logger.info(f"🔍 EXTRACTION: AI content extracted")
-                        logger.info(f"🔍 EXTRACTION:   Type: {type(last_ai_content)}")
-                        logger.info(f"🔍 EXTRACTION:   Length: {content_length}")
-                        logger.info(f"🔍 EXTRACTION:   IsEmpty: {is_empty}")
-                        logger.info(f"🔍 EXTRACTION:   Content: {content_repr}")
-                        logger.info(f"🔍 EXTRACTION:   Content (first 200 chars): '{str(last_ai_content)[:200]}'")
-                    else:
-                        logger.info(f"🔍 EXTRACTION: AI message has no 'content' attribute")
                     break
-                    
-            if not last_ai_message_found:
-                logger.info(f"🔍 EXTRACTION: No AI messages found in result")
-        else:
-            logger.info(f"🔍 EXTRACTION: Result has no messages to extract from")
         
         if confirmed:
-            logger.info(f"Conversation resumed successfully: {conversation_id}")
-            response_payload = {
+            return {
                 "status": "completed", 
                 "message": last_ai_content,
                 "conversation_id": conversation_id
             }
-            logger.info(f"🔍 FINAL_RESPONSE: Sending to frontend: {response_payload}")
-            return response_payload
         else:
-            logger.info(f"Conversation cancelled by user: {conversation_id}")
-            response_payload = {
+            return {
                 "status": "cancelled", 
                 "message": last_ai_content,
                 "conversation_id": conversation_id
             }
-            logger.info(f"🔍 FINAL_RESPONSE: Sending to frontend: {response_payload}")
-            return response_payload
             
     except asyncio.TimeoutError:
-        logger.error(f"Timeout resuming conversation {conversation_id} after 30 seconds")
         return {"status": "error", "error": "Resume operation timed out"}
     except Exception as e:
-        logger.error(f"Error resuming conversation {conversation_id}: {str(e)}")
-        import traceback
-        logger.error(f"Full traceback: {traceback.format_exc()}")
         return {"status": "error", "error": str(e)}
     
 
