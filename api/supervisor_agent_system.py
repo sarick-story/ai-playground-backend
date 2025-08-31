@@ -148,7 +148,7 @@ async def create_all_agents(mcp_tools):
             "Before calling mint_and_register_ip_with_terms, you MUST follow this workflow:\n\n"
             
             "1. **Check SPG Contract Minting Parameters:**\n"
-            "   - First call get_spg_nft_contract_minting_fee_and_token to get the contract's minting fee and token\n"
+            "   - First call get_spg_nft_minting_token to get the contract's minting fee and token\n"
             "   - This will return the minting_fee and minting_token for the specified SPG NFT contract\n\n"
             
             "2. **Set Hidden Parameters Based on Contract Type:**\n\n"
@@ -166,7 +166,7 @@ async def create_all_agents(mcp_tools):
             
             "**Example Workflow:**\n"
             "User: \"Mint an IP asset with SPG contract 0x123...\"\n"
-            "1. Call: get_spg_nft_contract_minting_fee_and_token(spg_nft_contract=\"0x123...\")\n"
+            "1. Call: get_spg_nft_minting_token(spg_nft_contract=\"0x123...\")\n"
             "2. Get result: {minting_fee: 100000, minting_token: \"0xABC...\"}\n"
             "3. Call: mint_and_register_ip_with_terms(..., spg_nft_contract_max_minting_fee=100000, spg_nft_contract_mint_fee_token=\"0xABC...\")\n\n"
             

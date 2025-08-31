@@ -4,7 +4,7 @@ IP_ASSET_TOOLS = set([
     "register", 
     "upload_image_to_ipfs",
     "create_ip_metadata",
-    "get_spg_nft_contract_minting_fee_and_token"
+    "get_spg_nft_minting_token"
 ])
 
 IP_ACCOUNT_TOOLS = set([
@@ -22,7 +22,7 @@ LICENSE_TOOLS = set([
 NFT_CLIENT_TOOLS = set([
     "create_spg_nft_collection",
     "mint_and_register_ip_with_terms",
-    "get_spg_nft_contract_minting_fee_and_token"
+    "get_spg_nft_minting_token"
 ])
 
 DISPUTE_TOOLS = set([

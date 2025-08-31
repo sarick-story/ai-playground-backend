@@ -185,7 +185,7 @@ system_prompt = """
 
         **SPG NFT Collection Tools:**
         - create_spg_nft_collection: Create new SPG NFT collections with custom mint fees, tokens, and settings
-        - get_spg_nft_contract_minting_fee_and_token: 🔍 PREREQUISITE - Get minting fee for SPG contracts (REQUIRED before mint_and_register_ip_with_terms with custom contract)
+        - get_spg_nft_minting_token: 🔍 PREREQUISITE - Get minting fee for SPG contracts (REQUIRED before mint_and_register_ip_with_terms with custom contract)
 
         **Royalty Management Tools:**
         - pay_royalty_on_behalf: Pay royalties on behalf of one IP to another with automatic WIP approval

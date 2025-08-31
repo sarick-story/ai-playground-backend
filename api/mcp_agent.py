@@ -6,24 +6,31 @@ from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 import os
 import asyncio
-import json
-import uuid
 import traceback
-import sys
-import re
-from typing import Dict, Any, Optional, List
+import sys  # noqa: F401 (may be used in future for sys.path or exits)
+from typing import Dict, Optional, List
 from dotenv import load_dotenv
-from langchain_core.callbacks.base import BaseCallbackHandler
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from langmem import create_memory_store_manager, create_manage_memory_tool, create_search_memory_tool
+import logging
 
 load_dotenv()
-
-# Set up logging
-import logging
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Global cache for checkpointers to persist memory across requests
+CHECKPOINTER_CACHE: Dict[str, InMemorySaver] = {}
+
+def get_checkpointer(conversation_id: str) -> InMemorySaver:
+    """Get or create a checkpointer for a given conversation ID."""
+    if conversation_id not in CHECKPOINTER_CACHE:
+        logger.info(f"Creating new checkpointer for conversation_id: {conversation_id}")
+        CHECKPOINTER_CACHE[conversation_id] = InMemorySaver()
+    else:
+        logger.info(f"Reusing existing checkpointer for conversation_id: {conversation_id}")
+    return CHECKPOINTER_CACHE[conversation_id]
 
 model = ChatOpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"), streaming=True)
 
@@ -32,7 +39,6 @@ system_prompt = """
     Only handle actions directly related to the Story protocol, blockchain, and the tools provided.
     Tools Provided:
 
-        - check_balance: Checks the balance of a given address on the blockchain.
         - get_transactions: Retrieves recent transactions for a specified address, with an optional limit on the number of transactions.
         - get_stats: Fetches current blockchain statistics, including total blocks, average block time, total transactions, and more.
         - get_address_overview: Provides a comprehensive overview of an address, including balance and contract status.
@@ -40,10 +46,12 @@ system_prompt = """
         - get_nft_holdings: Retrieves all NFT holdings for a given address, including collection information and metadata.
         - interpret_transaction: Provides a human-readable interpretation of a blockchain transaction based on its hash.
 
-    If it is unrelated to these topics, story blockchain, IP, or the tools provided, return "I'm sorry, I can only help with the Story protocol and blockchain analytics using the tools I have access to. Check the information button for a list of available tools."
+    IMPORTANT: If a tool fails with an error, acknowledge the error but try to provide helpful information anyway. Don't just say you can't help - explain what you tried to do and suggest alternatives.
+    
+    If the request is completely unrelated to Story protocol, blockchain, or IP topics, then return "I'm sorry, I can only help with the Story protocol and blockchain analytics using the tools I have access to. Check the information button for a list of available tools."
     
     Provide concise and clear analyses of findings using the available tools.
-    Remember the coin is $IP (IP) and the data is coming from blockscout API. 
+    Remember the coin is $IP (IP) and the data is coming from StoryScan/Blockscout API. 
 
     [IMPORTANT] Format blockchain statistics like this:
     
@@ -165,6 +173,100 @@ async def process_memory(messages, conversation_id=None):
         logger.error(traceback.format_exc())
         return None
 
+async def _run_with_storyscan_session(
+    server_params: StdioServerParameters,
+    user_message: str,
+    queue: Optional[asyncio.Queue],
+    conversation_id: Optional[str],
+    message_history: Optional[List[Dict[str, str]]]
+):
+    """Open Storyscan MCP stdio session, load tools, and run the agent within that session."""
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            logger.info("Loading Storyscan MCP tools via stdio session")
+            tools = await load_mcp_tools(session)
+            logger.info(f"Loaded {len(tools)} MCP tools")
+
+            # Log tool names for debugging
+            tool_names = [tool.name for tool in tools]
+            logger.info(f"Available tools: {', '.join(tool_names)}")
+
+            # Create memory tools with proper namespace
+            memory_tools = [
+                create_manage_memory_tool(
+                    namespace=("memories", conversation_id or "default"),
+                    store=store
+                ),
+                create_search_memory_tool(
+                    namespace=("memories", conversation_id or "default"),
+                    store=store
+                )
+            ]
+
+            all_tools = tools + memory_tools
+
+            # Create checkpointer for conversation persistence
+            checkpointer = get_checkpointer(conversation_id or "default")
+            
+            # Create agent with tools, memory, and checkpointer
+            agent = create_react_agent(
+                model,
+                all_tools,
+                prompt=system_prompt,
+                checkpointer=checkpointer
+            )
+
+            # Prepare messages for agent - use single HumanMessage, let checkpointer handle history
+            from langchain_core.messages import HumanMessage
+            
+            # Create single message for current user input - checkpointer handles conversation history
+            human_message = HumanMessage(content=user_message)
+
+            if queue:
+                # Run agent with proper thread configuration for memory persistence
+                logger.info("Starting agent with queue")
+                thread_config = {
+                    "configurable": {
+                        "thread_id": conversation_id or "default"
+                    }
+                }
+                result = await agent.ainvoke({"messages": [human_message]}, config=thread_config)
+                logger.info("Agent completed execution")
+                
+                # Extract and send the AI response
+                ai_response = None
+                if result and "messages" in result:
+                    # Find the last AI message in the result
+                    for msg in reversed(result["messages"]):
+                        if hasattr(msg, '__class__') and 'AI' in msg.__class__.__name__:
+                            if hasattr(msg, 'content') and msg.content:
+                                ai_response = msg.content
+                                logger.info(f"Sending AI response: {ai_response[:100]}...")
+                                # Send the complete response
+                                await queue.put(ai_response)
+                                break
+                
+                # Conversation is automatically stored by the checkpointer
+                if conversation_id and ai_response:
+                    logger.info(f"Conversation automatically persisted for thread_id: {conversation_id}")
+                
+                await queue.put({"done": True})
+                return result
+
+            else:
+                # Run without streaming
+                logger.info("Starting agent without streaming")
+                thread_config = {
+                    "configurable": {
+                        "thread_id": conversation_id or "default"
+                    }
+                }
+                result = await agent.ainvoke({"messages": [human_message]}, config=thread_config)
+                logger.info("Agent completed execution without streaming")
+                return result
+
 async def run_agent(
     user_message: str, 
     queue: Optional[asyncio.Queue] = None, 
@@ -197,137 +299,14 @@ async def run_agent(
     )
 
     try:
-        # Load MCP tools using centralized approach
-        from .supervisor_agent_system import load_fresh_mcp_tools
-        logger.info("Loading MCP tools")
-        tools = await load_fresh_mcp_tools()
-        logger.info(f"Loaded {len(tools)} MCP tools")
-        
-        # Log tool names for debugging
-        tool_names = [tool.name for tool in tools]
-        logger.info(f"Available tools: {', '.join(tool_names)}")
-
-        # Create memory tools with proper namespace
-        memory_tools = [
-            create_manage_memory_tool(
-                namespace=("memories", conversation_id or "default"),
-                store=store
-            ),
-            create_search_memory_tool(
-                namespace=("memories", conversation_id or "default"),
-                store=store
-            )
-        ]
-
-        all_tools = tools + memory_tools
-
-        # Create agent with tools and message history
-        agent = create_react_agent(
-            model,
-            all_tools,
-            state_modifier=system_prompt
+        # Run within a live Storyscan MCP stdio session (loads tools from storyscan-mcp)
+        return await _run_with_storyscan_session(
+            server_params=server_params,
+            user_message=user_message,
+            queue=queue,
+            conversation_id=conversation_id,
+            message_history=message_history
         )
-
-        # Prepare messages for agent
-        messages = message_history or [{"role": "user", "content": user_message}]
-        
-        if queue:
-                    # Streaming callback handler definition remains the same
-                    class StreamingCallbackHandler(BaseCallbackHandler):
-                        run_inline = True
-                        
-                        def __init__(self):
-                            super().__init__()
-                            self.queue = queue  # Store queue reference
-                        
-                        async def on_llm_new_token(self, token: str, **kwargs):
-                            try:
-                                logger.debug(f"LLM token: {token}")
-                                
-                                # Skip empty tokens
-                                if not token:
-                                    return
-                                
-                                # Handle newlines properly - don't escape them
-                                # Just ensure the token is safe for streaming
-                                safe_token = token
-                                
-                                # Only filter out problematic control characters, keep newlines
-                                safe_token = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', safe_token)
-                                
-                                # Send the token as-is (with proper newlines)
-                                await queue.put(safe_token)
-                            except Exception as e:
-                                logger.warning(f"Error processing token, skipping: {str(e)}")
-                                # If there's an error, just skip this token
-                                pass
-                        
-                        async def on_tool_start(self, tool_name: str, tool_input: Dict[str, Any], **kwargs):
-                            tool_call_id = str(uuid.uuid4())
-                            logger.info(f"Starting tool: {tool_name} with input: {tool_input}")
-                            await queue.put({
-                                "tool_call": {
-                                    "id": tool_call_id,
-                                    "name": tool_name,
-                                    "args": tool_input
-                                }
-                            })
-                            return tool_call_id
-                        
-                        async def on_tool_end(self, output: str, **kwargs):
-                            tool_call_id = kwargs.get("run_id", str(uuid.uuid4()))
-                            tool_name = kwargs.get("name", "unknown_tool")
-                            tool_input = kwargs.get("input", {})
-                            
-                            logger.info(f"Tool completed: {tool_name}")
-                            
-                            try:
-                                # For structured content outputs
-                                if isinstance(output, dict) and "content" in output:
-                                    content = output["content"]
-                                    if isinstance(content, list):
-                                        # Special handling for content array format
-                                        output_str = ""
-                                        for item in content:
-                                            if isinstance(item, dict) and "text" in item:
-                                                output_str += item["text"]
-                                            else:
-                                                output_str += str(item)
-                                    else:
-                                        output_str = str(content)
-                                else:
-                                    # Basic string extraction
-                                    output_str = (output.content if hasattr(output, "content")
-                                                else str(output) if hasattr(output, "__str__")
-                                                else "Tool execution completed")
-                                
-                                # Send the tool result to the queue
-                                await self.queue.put(f'content=\'{json.dumps({"content": output_str if not isinstance(output, dict) else output, "raw_data": output.get("raw_data", None) if isinstance(output, dict) else None})}\' name=\'{tool_name}\' tool_call_id=\'{tool_call_id}\'')
-                                
-                            except Exception as e:
-                                # Handle errors in processing tool output
-                                logger.error(f"Error in on_tool_end: {str(e)}")
-                                logger.error(traceback.format_exc())
-                                await self.queue.put(f'content=\'Error in tool execution: {str(e)}\' name=\'{tool_name}\' tool_call_id=\'{tool_call_id}\'')
-                    
-                    callbacks = [StreamingCallbackHandler()]
-                    
-                    # Run agent with streaming
-                    logger.info("Starting agent with streaming")
-                    result = await agent.ainvoke(
-                        {"messages": messages},  # Pass full message history
-                        config={"callbacks": callbacks}
-                    )
-                    logger.info("Agent completed execution with streaming")
-                    await queue.put({"done": True})
-                    return result
-                
-        else:
-            # Run without streaming
-            logger.info("Starting agent without streaming")
-            result = await agent.ainvoke({"messages": messages})
-            logger.info("Agent completed execution without streaming")
-            return result
 
     except Exception as e:
         logger.error(f"Error in agent execution: {str(e)}")

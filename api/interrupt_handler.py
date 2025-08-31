@@ -224,7 +224,7 @@ MCP_TOOL_OPTIONAL_PARAMETERS = {
         "owner": "your wallet"
     },
     
-    "get_spg_nft_contract_minting_fee_and_token": {},
+    "get_spg_nft_minting_token": {},
     
     "register": {
         "ip_metadata": "None"
