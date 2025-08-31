@@ -28,9 +28,18 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,  # More restrictive than "*"
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],  # Only methods we need
-    allow_headers=["Content-Type", "Authorization", "x-vercel-ai-data-stream"],  # Required headers
-    expose_headers=["x-vercel-ai-data-stream"],  # Expose this header to the client
+    allow_methods=["GET", "POST", "OPTIONS", "DELETE"],  # Include methods needed for WebSocket handshake
+    allow_headers=[
+        "Content-Type", 
+        "Authorization", 
+        "x-vercel-ai-data-stream",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "upgrade",
+        "connection"
+    ],  # Headers needed for WebSocket and streaming
+    expose_headers=["x-vercel-ai-data-stream", "upgrade", "connection"],  # Headers to expose
 )
 
 # Mount the chat app at /api to ensure paths match

@@ -1,0 +1,10 @@
+{
+  "messages": [
+    {
+      "role": "user", 
+      "content": "what is license terms for id 2?"
+    }
+  ],
+  "mcp_type": "sdk",
+  "wallet_address": "0x1234567890abcdef1234567890abcdef12345678"
+}
