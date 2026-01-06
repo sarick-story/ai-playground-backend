@@ -1,7 +1,7 @@
 # AI Playground Backend
 ## 👤 Personal Contributions & Internship Context
 **Developer:** Zizhuo (Cosmo) Liu
-**Role:** AI Engineering Intern at **Story Protocol** (June 2025 – August 2025) 
+* **Role:** AI Engineering Intern at **Story Protocol** (June 2025 – August 2025) 
 
 This repository represents the core backend I designed, implemented, and deployed during my internship to support AI-driven blockchain licensing and IP automation
 
