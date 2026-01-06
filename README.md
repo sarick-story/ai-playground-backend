@@ -1,4 +1,17 @@
 # AI Playground Backend
+## 👤 Personal Contributions & Internship Context
+**Developer:** Zizhuo (Cosmo) Liu
+**Role:** AI Engineering Intern at **Story Protocol** (June 2025 – August 2025) 
+
+This repository represents the core backend I designed, implemented, and deployed during my internship to support AI-driven blockchain licensing and IP automation
+
+### 🛠️ Key Technical Highlights
+* **Multi-Agent Orchestration**: Designed and implemented a **LangGraph supervisor** to coordinate 9 specialized agents, enabling modular testing and domain specialization
+* **AI Security & Safety**: Implemented **risk-detection hooks** and human-in-the-loop feedback requiring user approval for tools with side effects to prevent unauthorized operations
+* **Tool Development**: Developed **15+ specialized MCP tools** that extend the Story Protocol Python SDK for blockchain interactions
+* **System Architecture**: Designed and implemented **stateless MCP sessions** to ensure scalable execution and smooth integration with LangGraph workflows
+* **State Management**: Migrated conversation history to **backend storage** using LangGraph checkpointers, reducing engineering complexity and improving reliability
+* **Observability**: Integrated **LangSmith tracing** to capture tool calls and routing logic, which doubled debugging and auditing efficiency
 
 This is the backend for the AI Playground, featuring a sophisticated **specialized multi-agent system** that provides intelligent routing, enhanced security, and seamless blockchain operations for Story Protocol.
 
